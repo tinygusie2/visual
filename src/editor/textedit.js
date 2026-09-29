@@ -1,6 +1,7 @@
 // Typing in a text layer: a transparent <textarea> placed exactly over the layer, styled like it at the current zoom.
 // The canvas skips drawing that layer meanwhile. Escape or clicking elsewhere finishes; an empty text is removed.
 import { absolute } from '../core/document.js';
+import { mainColor } from '../core/paint.js';
 
 export function attachTextEditor(host, editor) {
   const area = document.createElement('textarea');
@@ -20,7 +21,7 @@ export function attachTextEditor(host, editor) {
       height: `${Math.max(node.h, node.fontSize * node.lineHeight) * z}px`,
       font: `${node.fontWeight} ${node.fontSize * z}px "${node.fontFamily}", system-ui, sans-serif`,
       lineHeight: `${node.fontSize * node.lineHeight * z}px`, letterSpacing: `${node.letterSpacing * z}px`,
-      textAlign: node.align, color: node.fill, opacity: node.opacity,
+      textAlign: node.align, color: mainColor(node) || '#000000', opacity: node.opacity,
       whiteSpace: node.sizing === 'auto-width' ? 'pre' : 'pre-wrap'
     });
   }

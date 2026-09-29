@@ -13,6 +13,10 @@ contextBridge.exposeInMainWorld('host', {
   closeWindow: () => ipcRenderer.invoke('close-window'),
   showInFolder: path => ipcRenderer.invoke('show-in-folder', path),
   window: action => ipcRenderer.invoke('window', action),
+  exportFiles: (files, title, folder) => ipcRenderer.invoke('export-files', files, title, folder),
+  openFolder: folder => ipcRenderer.invoke('open-folder', folder),
+  copyImage: data => ipcRenderer.invoke('clipboard-image', data),
+  copyText: text => ipcRenderer.invoke('clipboard-text', text),
   onRequestClose: cb => ipcRenderer.on('request-close', () => cb()),
   onOpenPath: cb => ipcRenderer.on('open-path', (_e, path) => cb(path))
 });

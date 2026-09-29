@@ -1,18 +1,14 @@
-// Draws a page on a <canvas>: the design in world space, then the editor's overlays (frame names, hover, selection,
-// handles, marquee) in screen space. Nothing is drawn with DOM elements, so thousands of layers stay cheap.
+// Draws a page on the editor <canvas>: the design in world space (draw.js), then the editor's overlays in screen
+// space: frame names, hover, selection and handles, snap guides, distances and the selection rectangle.
+// Nothing is drawn with DOM elements, so thousands of layers stay cheap.
 import { absoluteRect } from '../core/document.js';
-import { fontString, layoutText } from '../core/text.js';
+import { fontString } from '../core/text.js';
+import { drawNode } from './draw.js';
 
+export { measurer } from './draw.js';
 export const SELECT = '#4f8cff';
+export const GUIDE = '#f24e6b';
 export const HANDLE_SIZE = 8;
-
-const measureCtx = document.createElement('canvas').getContext('2d');
-// measure(node) → string → width, for layoutText / fitTextSize.
-export function measurer(node) {
-  measureCtx.font = fontString(node);
-  measureCtx.letterSpacing = `${node.letterSpacing}px`;
-  return s => measureCtx.measureText(s).width;
-}
 
 export class Renderer {
   constructor(canvas, editor) {
@@ -52,51 +48,22 @@ export class Renderer {
     if (!page) return;
     const dpr = window.devicePixelRatio || 1, cam = editor.camera;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.filter = 'none';
     ctx.fillStyle = page.background || '#1e1f23';
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-    ctx.setTransform(dpr * cam.zoom, 0, 0, dpr * cam.zoom, -cam.x * dpr * cam.zoom, -cam.y * dpr * cam.zoom);
-    for (const node of page.children) this.drawNode(node);
+    const scale = dpr * cam.zoom;
+    ctx.setTransform(scale, 0, 0, scale, -cam.x * scale, -cam.y * scale);
+    const env = { scale, skipId: editor.editingTextId, backdrop: true, ensureFont: n => this.ensureFont(n) };
+    for (const node of page.children) drawNode(ctx, node, env);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.drawOverlay();
-  }
-
-  drawNode(node) {
-    if (!node.visible) return;
-    const { ctx } = this;
-    ctx.save();
-    ctx.translate(node.x, node.y);
-    ctx.globalAlpha *= node.opacity;
-    ctx.fillStyle = node.fill;
-    if (node.type === 'frame' || node.type === 'rect') {
-      ctx.beginPath();
-      ctx.roundRect(0, 0, node.w, node.h, Math.min(node.radius || 0, node.w / 2, node.h / 2));
-      ctx.fill();
-      if (node.type === 'frame') {
-        if (node.clip) ctx.clip();
-        for (const child of node.children) this.drawNode(child);
-      }
-    } else if (node.type === 'ellipse') {
-      ctx.beginPath();
-      ctx.ellipse(node.w / 2, node.h / 2, node.w / 2, node.h / 2, 0, 0, Math.PI * 2);
-      ctx.fill();
-    } else if (node.type === 'text' && node.id !== this.editor.editingTextId) {
-      this.ensureFont(node);
-      const { lines, lineHeight } = layoutText(node, measurer(node));
-      ctx.font = fontString(node);
-      ctx.letterSpacing = `${node.letterSpacing}px`;
-      ctx.textBaseline = 'middle';
-      ctx.textAlign = node.align;
-      const x = node.align === 'center' ? node.w / 2 : node.align === 'right' ? node.w : 0;
-      if (node.sizing === 'fixed') { ctx.beginPath(); ctx.rect(0, 0, node.w, node.h); ctx.clip(); }
-      lines.forEach((line, i) => ctx.fillText(line, x, i * lineHeight + lineHeight / 2));
-    }
-    ctx.restore();
   }
 
   drawOverlay() {
     const { ctx, editor } = this;
     const index = editor.index, cam = editor.camera;
     const scr = r => ({ x: (r.x - cam.x) * cam.zoom, y: (r.y - cam.y) * cam.zoom, w: r.w * cam.zoom, h: r.h * cam.zoom });
+    const pt = (x, y) => ({ x: (x - cam.x) * cam.zoom, y: (y - cam.y) * cam.zoom });
     const selected = new Set(editor.selection);
     ctx.font = '500 11px "Google Sans Flex", system-ui, sans-serif';
     ctx.textBaseline = 'bottom'; ctx.textAlign = 'left'; ctx.letterSpacing = '0px';
@@ -109,14 +76,21 @@ export class Renderer {
       ctx.fillText(fitLabel(ctx, node.name, Math.max(r.w, 40)), r.x, r.y - 4);
     }
 
-    const outline = (r, width = 1) => { ctx.lineWidth = width; ctx.strokeStyle = SELECT; ctx.strokeRect(Math.round(r.x) + .5, Math.round(r.y) + .5, Math.round(r.w), Math.round(r.h)); };
-    if (editor.hoverId && !selected.has(editor.hoverId) && index.has(editor.hoverId)) {
-      const node = index.get(editor.hoverId).node;
-      const r = scr(absoluteRect(index, node.id));
-      if (node.type === 'ellipse') this.ellipseOutline(r); else outline(r, 1.5);
-    }
+    const outline = (r, width = 1, dash) => {
+      ctx.lineWidth = width; ctx.strokeStyle = SELECT; ctx.setLineDash(dash || []);
+      ctx.strokeRect(Math.round(r.x) + .5, Math.round(r.y) + .5, Math.round(r.w), Math.round(r.h));
+      ctx.setLineDash([]);
+    };
+    const outlineNode = (id, width) => {
+      const node = index.get(id).node, r = scr(absoluteRect(index, id));
+      if (node.type === 'ellipse') {
+        ctx.lineWidth = width; ctx.strokeStyle = SELECT;
+        ctx.beginPath(); ctx.ellipse(r.x + r.w / 2, r.y + r.h / 2, Math.max(0, r.w / 2), Math.max(0, r.h / 2), 0, 0, Math.PI * 2); ctx.stroke();
+      } else outline(r, width, node.type === 'group' ? [4, 3] : null);
+    };
     const drag = editor.drag;
-    for (const id of editor.selection) if (index.has(id)) outline(scr(absoluteRect(index, id)));
+    if (editor.hoverId && !selected.has(editor.hoverId) && index.has(editor.hoverId)) outlineNode(editor.hoverId, 1.5);
+    for (const id of editor.selection) if (index.has(id)) outlineNode(id, 1);
 
     const box = editor.selectionBounds();
     if (box && !editor.editingTextId) {
@@ -129,15 +103,34 @@ export class Renderer {
           ctx.strokeRect(Math.round(h.x - HANDLE_SIZE / 2) + .5, Math.round(h.y - HANDLE_SIZE / 2) + .5, HANDLE_SIZE - 1, HANDLE_SIZE - 1);
         }
       }
-      // Size label under the selection.
-      const label = `${round(box.w)} × ${round(box.h)}`;
-      ctx.font = '600 11px "Google Sans Flex", system-ui, sans-serif';
-      const tw = ctx.measureText(label).width + 12;
-      const lx = r.x + r.w / 2 - tw / 2, ly = r.y + r.h + 8;
-      ctx.fillStyle = SELECT;
-      ctx.beginPath(); ctx.roundRect(lx, ly, tw, 18, 4); ctx.fill();
-      ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(label, lx + tw / 2, ly + 9.5);
+      if (!editor.measures.length) pill(ctx, `${round(box.w)} × ${round(box.h)}`, r.x + r.w / 2, r.y + r.h + 17, SELECT);
+    }
+
+    // Snap guides: thin lines with a small cross at each end.
+    ctx.strokeStyle = GUIDE; ctx.lineWidth = 1;
+    for (const g of editor.guides) {
+      const a = g.axis === 'x' ? pt(g.value, g.from) : pt(g.from, g.value);
+      const b = g.axis === 'x' ? pt(g.value, g.to) : pt(g.to, g.value);
+      ctx.beginPath();
+      if (g.axis === 'x') { const x = Math.round(a.x) + .5; ctx.moveTo(x, a.y); ctx.lineTo(x, b.y); }
+      else { const y = Math.round(a.y) + .5; ctx.moveTo(a.x, y); ctx.lineTo(b.x, y); }
+      ctx.stroke();
+      for (const p of [a, b]) { ctx.beginPath(); ctx.moveTo(p.x - 3, p.y - 3); ctx.lineTo(p.x + 3, p.y + 3); ctx.moveTo(p.x + 3, p.y - 3); ctx.lineTo(p.x - 3, p.y + 3); ctx.stroke(); }
+    }
+    // Distances: a line between the two edges with the number in the middle.
+    for (const m of editor.measures) {
+      if (m.value < 0.5) continue;
+      const a = pt(m.x1, m.y1), b = pt(m.x2, m.y2);
+      ctx.strokeStyle = GUIDE; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(Math.round(a.x) + .5, Math.round(a.y) + .5); ctx.lineTo(Math.round(b.x) + .5, Math.round(b.y) + .5); ctx.stroke();
+      const vertical = Math.abs(a.x - b.x) < 1;
+      for (const p of [a, b]) {
+        ctx.beginPath();
+        if (vertical) { ctx.moveTo(p.x - 3, Math.round(p.y) + .5); ctx.lineTo(p.x + 3, Math.round(p.y) + .5); }
+        else { ctx.moveTo(Math.round(p.x) + .5, p.y - 3); ctx.lineTo(Math.round(p.x) + .5, p.y + 3); }
+        ctx.stroke();
+      }
+      pill(ctx, String(round(m.value)), (a.x + b.x) / 2, (a.y + b.y) / 2, GUIDE);
     }
 
     if (drag?.kind === 'marquee' && drag.rect) {
@@ -146,15 +139,19 @@ export class Renderer {
       outline(r);
     }
   }
-
-  ellipseOutline(r) {
-    const { ctx } = this;
-    ctx.lineWidth = 1.5; ctx.strokeStyle = SELECT;
-    ctx.beginPath(); ctx.ellipse(r.x + r.w / 2, r.y + r.h / 2, Math.max(0, r.w / 2), Math.max(0, r.h / 2), 0, 0, Math.PI * 2); ctx.stroke();
-  }
 }
 
-// Screen positions of the eight resize handles of a screen rectangle, in the order of HANDLES.
+function pill(ctx, label, cx, cy, color) {
+  ctx.font = '600 11px "Google Sans Flex", system-ui, sans-serif';
+  const w = ctx.measureText(label).width + 10;
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.roundRect(Math.round(cx - w / 2), Math.round(cy - 9), w, 18, 4); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, cx, cy + .5);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+}
+
+// Screen positions of the eight resize handles of a screen rectangle.
 export function handlePoints(r) {
   const cx = r.x + r.w / 2, cy = r.y + r.h / 2, R = r.x + r.w, B = r.y + r.h;
   return [

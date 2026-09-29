@@ -21,6 +21,17 @@ const paths = {
   fixed: '<rect x="2.5" y="2.5" width="11" height="11" rx="1"/><path d="M5.5 8h5"/>',
   'clip': '<rect x="2.5" y="2.5" width="11" height="11" rx="1" stroke-dasharray="2 2"/>',
   minus: '<path d="M3 8h10"/>',
+  group: '<rect x="2.5" y="2.5" width="11" height="11" rx="1" stroke-dasharray="2.2 1.8"/>',
+  eyedropper: '<path d="M10.5 2.5l3 3-1.5 1.5-3-3zM9 4l3 3-6.5 6.5H2.5v-3z"/>',
+  'al-left': '<path d="M2.5 2v12M5 5h8M5 11h5"/>',
+  'al-hcenter': '<path d="M8 2v12M4 5h8M5.5 11h5"/>',
+  'al-right': '<path d="M13.5 2v12M3 5h8M6 11h5"/>',
+  'al-top': '<path d="M2 2.5h12M5 5v8M11 5v5"/>',
+  'al-vcenter': '<path d="M2 8h12M5 4v8M11 5.5v5"/>',
+  'al-bottom': '<path d="M2 13.5h12M5 3v8M11 6v5"/>',
+  'dist-h': '<path d="M2.5 2v12M13.5 2v12M6.5 5v6h3V5z"/>',
+  'dist-v': '<path d="M2 2.5h12M2 13.5h12M5 6.5h6v3H5z"/>',
+  tidy: '<rect x="2" y="5" width="3" height="6"/><rect x="6.5" y="5" width="3" height="6"/><rect x="11" y="5" width="3" height="6"/>',
   x: '<path d="M4 4l8 8M12 4l-8 8"/>'
 };
 

@@ -2,9 +2,10 @@
 // the panels only call these methods and listen for 'change'; they never edit the document on their own, so every
 // change goes through the undo history.
 import {
-  absolute, absoluteRect, boundsOf, childrenOf, cloneWithNewIds, createDocument, createNode, createPage, detach, indexPage,
+  absolute, absoluteRect, boundsOf, childrenOf, cloneWithNewIds, createDocument, createNode, createPage, detach, fitGroups, indexPage,
   isAncestor, reparent, topLevelOnly, walk
 } from '../core/document.js';
+import { align, distribute, tidy } from '../core/snap.js';
 import { fitRect, pointInEllipse, pointInRect, zoomAt } from '../core/geometry.js';
 import { History } from '../core/history.js';
 import { fitTextSize } from '../core/text.js';
@@ -20,6 +21,7 @@ export class Editor extends EventTarget {
     this.tool = 'move';
     this.hoverId = null; this.editingTextId = null; this.drag = null;
     this.clipboard = null;
+    this.guides = []; this.measures = []; // snap lines and distances shown on the canvas
     this._index = null;
     this.viewport = { w: 1200, h: 800 };
   }
@@ -31,6 +33,7 @@ export class Editor extends EventTarget {
     this.history.clear(); this.editingTextId = null; this.hoverId = null; this.tool = 'move';
     this._index = null;
     this.refitText();
+    for (const page of doc.pages) fitGroups(page.children);
     this.zoomToFit(false);
     this.emit({ doc: true, selection: true, file: true, page: true });
   }
@@ -59,6 +62,7 @@ export class Editor extends EventTarget {
   state() { return { doc: this.doc, selection: this.selection, pageId: this.pageId }; }
   begin() { this.history.begin(this.state()); }
   commit() {
+    if (this.page) { fitGroups(this.page.children); this._index = null; }
     if (this.history.commit(this.state())) { this.dirty = true; this.emit({ file: true }); }
   }
   // One undo step around fn.
@@ -128,7 +132,8 @@ export class Editor extends EventTarget {
         const n = nodes[i];
         if (!n.visible) continue;
         const r = { x: ox + n.x, y: oy + n.y, w: n.w, h: n.h };
-        const inside = n.type === 'ellipse' ? pointInEllipse(p, r) : pointInRect(p, r);
+        // A group has no area of its own: only its content can be hit.
+        const inside = n.type === 'group' ? false : n.type === 'ellipse' ? pointInEllipse(p, r) : pointInRect(p, r);
         if (n.children && (!n.clip || inside)) {
           const sub = search(n.children, r.x, r.y);
           if (sub) return n.locked ? null : [n, ...sub];
@@ -165,9 +170,12 @@ export class Editor extends EventTarget {
     const search = (nodes, ox, oy) => {
       for (let i = nodes.length - 1; i >= 0; i--) {
         const n = nodes[i];
-        if (n.type !== 'frame' || !n.visible || skip(n.id)) continue;
+        if (!n.children || !n.visible || skip(n.id)) continue;
         const r = { x: ox + n.x, y: oy + n.y, w: n.w, h: n.h };
-        if (pointInRect(p, r)) { found = n; search(n.children, r.x, r.y); return; }
+        if (!pointInRect(p, r)) continue;
+        // Groups are looked through: a frame inside a group can still take the layers.
+        if (n.type === 'group') { const before = found; search(n.children, r.x, r.y); if (found !== before) return; continue; }
+        found = n; search(n.children, r.x, r.y); return;
       }
     };
     search(this.page.children, 0, 0);
@@ -300,6 +308,91 @@ export class Editor extends EventTarget {
   }
 
   rename(id, name) { if (name.trim()) this.update([id], { name: name.trim() }); }
+
+  // ---------- groups and frames around the selection ----------
+  // The selection in stacking order (bottom first), for wrapping it in a group or frame.
+  zOrdered(ids) {
+    const order = [];
+    walk(this.page.children, n => { order.push(n.id); });
+    return [...ids].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  }
+
+  // Wraps the selection in a new group (Ctrl+G) or frame (Ctrl+Alt+G) in the parent of the topmost layer.
+  wrap(type) {
+    const ids = this.zOrdered(topLevelOnly(this.index, this.selection));
+    if (!ids.length) return;
+    this.transact(() => {
+      const index = this.index;
+      const top = index.get(ids.at(-1));
+      const parent = top.parent;
+      const box = boundsOf(ids.map(id => absoluteRect(index, id)));
+      const origin = parent ? absolute(index, parent.id) : { x: 0, y: 0 };
+      const props = { x: box.x - origin.x, y: box.y - origin.y, w: box.w, h: box.h };
+      const wrapper = createNode(type, type === 'frame' ? { ...props, fills: [], clip: false } : props);
+      const list = childrenOf(this.page, parent);
+      list.splice(list.indexOf(top.node) + 1, 0, wrapper);
+      this._index = null;
+      for (const id of ids) { reparent(this.page, this.index, id, wrapper); this._index = null; }
+      this.selection = [wrapper.id];
+    });
+  }
+
+  // Ctrl+Shift+G: takes the content out of selected groups (and frames), keeping it where it is.
+  unwrap() {
+    const containers = this.selectedNodes.filter(n => n.children);
+    if (!containers.length) return;
+    this.transact(() => {
+      const freed = [];
+      for (const c of containers) {
+        const { parent } = this.index.get(c.id);
+        const list = childrenOf(this.page, parent);
+        const at = list.indexOf(c);
+        for (const child of c.children) { child.x += c.x; child.y += c.y; freed.push(child.id); }
+        list.splice(at, 1, ...c.children);
+        this._index = null;
+      }
+      this.selection = [...this.selection.filter(id => !containers.some(c => c.id === id)), ...freed];
+    });
+  }
+
+  // ---------- align, distribute, tidy ----------
+  // Moves layers to new absolute positions.
+  placeAbsolute(ids, positions) {
+    const index = this.index;
+    ids.forEach((id, i) => {
+      const { node, parent } = index.get(id);
+      const origin = parent ? absolute(index, parent.id) : { x: 0, y: 0 };
+      node.x = Math.round(positions[i].x - origin.x); node.y = Math.round(positions[i].y - origin.y);
+    });
+  }
+
+  // One layer lines up in its parent frame; several line up with each other.
+  align(how) {
+    const index = this.index;
+    const ids = topLevelOnly(index, this.selection);
+    if (!ids.length) return;
+    let box;
+    if (ids.length === 1) {
+      const parent = index.get(ids[0]).parent;
+      if (!parent) return;
+      box = absoluteRect(index, parent.id);
+    } else box = this.selectionBounds();
+    this.transact(() => this.placeAbsolute(ids, align(ids.map(id => absoluteRect(index, id)), box, how)));
+  }
+
+  distribute(axis) {
+    const index = this.index;
+    const ids = topLevelOnly(index, this.selection);
+    if (ids.length < 3) return;
+    this.transact(() => this.placeAbsolute(ids, distribute(ids.map(id => absoluteRect(index, id)), axis)));
+  }
+
+  tidyUp() {
+    const index = this.index;
+    const ids = topLevelOnly(index, this.selection);
+    if (ids.length < 2) return;
+    this.transact(() => this.placeAbsolute(ids, tidy(ids.map(id => absoluteRect(index, id)))));
+  }
 
   // ---------- clipboard (inside Visual for now) ----------
   copy() {

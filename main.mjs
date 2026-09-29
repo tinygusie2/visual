@@ -1,7 +1,7 @@
 // Electron shell: files, native dialogs, recent projects. The editor itself lives in the page (src/).
 // The page is served from app://visual/ instead of file:// so its ES modules load like on a web server.
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, session, shell } from 'electron';
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, protocol, session, shell } from 'electron';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, extname, join, normalize, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -62,6 +62,22 @@ ipcMain.handle('confirm-unsaved', async (_e, texts) => {
   const r = await dialog.showMessageBox(win, { type: 'question', defaultId: 0, cancelId: 2, noLink: true, ...texts });
   return ['save', 'discard', 'cancel'][r.response];
 });
+// Export: asks for a folder (unless one is given, as by the self check) and writes the files there.
+// files: [{ name, data: ArrayBuffer | string }]. Returns { folder, names } or null when cancelled.
+let lastExportDir = null;
+ipcMain.handle('export-files', async (_e, files, title, folder) => {
+  if (!folder) {
+    const r = await dialog.showOpenDialog(win, { title, defaultPath: lastExportDir || app.getPath('pictures'), properties: ['openDirectory', 'createDirectory'] });
+    if (r.canceled || !r.filePaths[0]) return null;
+    folder = lastExportDir = r.filePaths[0];
+  }
+  mkdirSync(folder, { recursive: true });
+  for (const f of files) writeFileSync(join(folder, basename(f.name)), typeof f.data === 'string' ? f.data : Buffer.from(f.data));
+  return { folder, names: files.map(f => basename(f.name)) };
+});
+ipcMain.handle('open-folder', (_e, folder) => shell.openPath(folder));
+ipcMain.handle('clipboard-image', (_e, data) => clipboard.writeImage(nativeImage.createFromBuffer(Buffer.from(data))));
+ipcMain.handle('clipboard-text', (_e, text) => clipboard.writeText(text));
 ipcMain.handle('pending-open', () => { const p = pendingOpen; pendingOpen = null; return p; });
 ipcMain.handle('close-window', () => { allowClose = true; win?.close(); });
 ipcMain.handle('show-in-folder', (_e, path) => shell.showItemInFolder(path));
@@ -124,6 +140,9 @@ async function runSmoke() {
     await new Promise(r => setTimeout(r, 1200));
     writeFileSync(shot, (await win.webContents.capturePage()).toPNG());
   }
+  // Its own files; the settings folder only when it is the temporary one made for the check.
+  const temporary = [out, out.replace(/\.visual$/i, '-export'), ...(process.env.VISUAL_HOME ? [] : [settingsDir])];
+  for (const p of temporary) rmSync(p, { recursive: true, force: true });
   app.exit(result.ok ? 0 : 1);
 }
 

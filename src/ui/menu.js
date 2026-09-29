@@ -19,11 +19,15 @@ export function showMenu(anchor, items, { align = 'left' } = {}) {
     menu.append(b);
   }
   document.body.append(menu);
-  const r = anchor.getBoundingClientRect();
-  menu.style.top = `${r.bottom + 4}px`;
-  menu.style.left = align === 'right' ? `${Math.max(8, r.right - menu.offsetWidth)}px` : `${r.left}px`;
-  open = { menu, anchor };
-  anchor.classList.add('open');
+  // anchor: the button that opened it, or a point { x, y } (right-click menus).
+  const isPoint = !(anchor instanceof Element);
+  const r = isPoint ? { top: anchor.y, bottom: anchor.y, left: anchor.x, right: anchor.x } : anchor.getBoundingClientRect();
+  const top = isPoint ? r.top : r.bottom + 4;
+  menu.style.top = `${Math.max(8, Math.min(top, window.innerHeight - menu.offsetHeight - 8))}px`;
+  const left = align === 'right' ? r.right - menu.offsetWidth : r.left;
+  menu.style.left = `${Math.max(8, Math.min(left, window.innerWidth - menu.offsetWidth - 8))}px`;
+  open = { menu, anchor: isPoint ? document.createElement('span') : anchor };
+  open.anchor.classList.add('open');
   setTimeout(() => document.addEventListener('pointerdown', outside, true));
   menu.querySelector('.menu-item:not(:disabled)')?.focus();
 }

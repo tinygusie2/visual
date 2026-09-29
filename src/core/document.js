@@ -4,34 +4,47 @@
 // editable on the canvas.
 //
 // This module is plain data + functions (no DOM), so it runs in the editor and in node tests alike.
+import { solid } from './paint.js';
 
 export const FORMAT = 'visual';
-export const FORMAT_VERSION = 1;
+export const FORMAT_VERSION = 2;
 
 export function newId(prefix = 'node') {
   const bytes = crypto.getRandomValues(new Uint8Array(6));
   return `${prefix}_${[...bytes].map(b => b.toString(16).padStart(2, '0')).join('')}`;
 }
 
-const base = { rotation: 0, opacity: 1, visible: true, locked: false };
+// fills/strokes: see paint.js. effects: { type: 'drop-shadow' | 'inner-shadow', x, y, blur, spread, color, opacity,
+// visible } or { type: 'layer-blur' | 'background-blur', radius, visible }. exports: { format: png|jpg|webp|svg, scale }.
+const base = () => ({ rotation: 0, opacity: 1, visible: true, locked: false, fills: [], strokes: [], effects: [], exports: [] });
 
 export const defaults = {
-  frame: { ...base, fill: '#ffffff', radius: 0, clip: true, children: [] },
-  rect: { ...base, fill: '#d9d9d9', radius: 0 },
-  ellipse: { ...base, fill: '#d9d9d9' },
+  frame: { ...base(), fills: [solid('#ffffff')], radius: 0, clip: true, children: [] },
+  group: { ...base(), children: [] },
+  rect: { ...base(), fills: [solid('#d9d9d9')], radius: 0 },
+  ellipse: { ...base(), fills: [solid('#d9d9d9')] },
   text: {
-    ...base, fill: '#000000', text: '', fontFamily: 'Google Sans Flex', fontSize: 16, fontWeight: 400,
+    ...base(), fills: [solid('#000000')], text: '', fontFamily: 'Google Sans Flex', fontSize: 16, fontWeight: 400,
     lineHeight: 1.2, letterSpacing: 0, align: 'left', sizing: 'auto-width'
   }
 };
 
-const typeNames = { frame: 'Frame', rect: 'Rectangle', ellipse: 'Ellipse', text: 'Text' };
+// Containers hold children: a frame is a real box (size, fill, clipping), a group only keeps layers together and is
+// always exactly as big as its content.
+export const isContainer = n => n.type === 'frame' || n.type === 'group';
+
+const typeNames = { frame: 'Frame', group: 'Group', rect: 'Rectangle', ellipse: 'Ellipse', text: 'Text' };
 
 export function createNode(type, props = {}) {
   if (!defaults[type]) throw new Error(`Unknown node type: ${type}`);
   const node = { id: newId(), type, name: typeNames[type], x: 0, y: 0, w: 100, h: 100, ...structuredClone(defaults[type]), ...props };
   if (type === 'text' && !props.name) node.name = (node.text || 'Text').split('\n')[0].slice(0, 40) || 'Text';
   return node;
+}
+
+// Older files: version 1 had one colour in `fill`.
+function migrate(node) {
+  if (typeof node.fill === 'string') { node.fills = [solid(node.fill)]; delete node.fill; }
 }
 
 export function createPage(name = 'Page 1') {
@@ -54,12 +67,14 @@ export function parseDocument(text) {
   const fix = node => {
     const d = defaults[node.type];
     if (!d) throw new Error(`Unknown layer type "${node.type}" in this document.`);
+    migrate(node);
     for (const [k, v] of Object.entries(d)) if (node[k] === undefined) node[k] = structuredClone(v);
     if (!node.id || seen.has(node.id)) node.id = newId();
     seen.add(node.id);
     node.children?.forEach(fix);
   };
   for (const page of doc.pages) { page.id ||= newId('page'); page.children ||= []; page.children.forEach(fix); }
+  doc.version = FORMAT_VERSION;
   return doc;
 }
 
@@ -142,4 +157,19 @@ export function boundsOf(rects) {
   const x = Math.min(...rects.map(r => r.x)), y = Math.min(...rects.map(r => r.y));
   const r = Math.max(...rects.map(r => r.x + r.w)), b = Math.max(...rects.map(r => r.y + r.h));
   return { x, y, w: r - x, h: b - y };
+}
+
+// Groups are always exactly the size of their content: after layers inside moved or changed, the group takes their
+// bounds again and the children are shifted so nothing moves on screen. An empty group disappears.
+export function fitGroups(nodes) {
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const n = nodes[i];
+    if (!n.children) continue;
+    fitGroups(n.children);
+    if (n.type !== 'group') continue;
+    if (!n.children.length) { nodes.splice(i, 1); continue; }
+    const box = boundsOf(n.children);
+    if (box.x || box.y) for (const c of n.children) { c.x -= box.x; c.y -= box.y; }
+    n.x += box.x; n.y += box.y; n.w = box.w; n.h = box.h;
+  }
 }

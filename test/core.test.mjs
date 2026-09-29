@@ -38,7 +38,7 @@ test('parseDocument rejects other files, fills in missing fields and repairs dup
     { id: 'node_a', type: 'rect', x: 0, y: 0, w: 1, h: 1 }, { id: 'node_a', type: 'text', text: 'x', x: 0, y: 0, w: 1, h: 1 }
   ] }] }));
   const [a, b] = doc.pages[0].children;
-  assert.equal(a.fill, '#d9d9d9');
+  assert.equal(a.fills[0].color, '#d9d9d9');
   assert.equal(b.fontSize, 16);
   assert.notEqual(a.id, b.id);
   assert.throws(() => parseDocument(JSON.stringify({ format: 'visual', version: 1, pages: [{ children: [{ type: 'blob' }] }] })), /Unknown layer type/);
