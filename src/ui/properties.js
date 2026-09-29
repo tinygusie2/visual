@@ -3,12 +3,14 @@
 import { walk } from '../core/document.js';
 import { evaluate } from '../core/expr.js';
 import { normalizeHex, paintCss, solid, stroke } from '../core/paint.js';
+import { inFlow } from '../core/layout.js';
+import { assetUrl } from '../render/images.js';
 import { closeColorPicker, openColorPicker } from './colorpicker.js';
 import { icon } from './icons.js';
 import { t } from './i18n.js';
 import { framePresets } from './presets.js';
 
-const typeLabel = { frame: 'Frame', group: 'Group', rect: 'Rectangle', ellipse: 'Ellipse', text: 'Text' };
+const typeLabel = { frame: 'Frame', group: 'Group', rect: 'Rectangle', ellipse: 'Ellipse', text: 'Text', vector: 'Vector' };
 const weights = [[100, 'Thin'], [200, 'Extra light'], [300, 'Light'], [400, 'Regular'], [500, 'Medium'], [600, 'Semibold'], [700, 'Bold'], [800, 'Extra bold'], [900, 'Black']];
 const effectTypes = [['drop-shadow', 'Drop shadow'], ['inner-shadow', 'Inner shadow'], ['layer-blur', 'Layer blur'], ['background-blur', 'Background blur']];
 const newEffect = type => type.endsWith('shadow')
@@ -16,7 +18,7 @@ const newEffect = type => type.endsWith('shadow')
   : { type, radius: type === 'layer-blur' ? 4 : 24, visible: true };
 const round = v => Math.round(v * 100) / 100;
 
-export function attachProperties(root, editor, { fonts, onExport }) {
+export function attachProperties(root, editor, { fonts, onExport, onPickImage }) {
   const collapsed = new Set();
   let refreshers = [];
   let signature = '';
@@ -130,19 +132,28 @@ export function attachProperties(root, editor, { fonts, onExport }) {
     b.className = 'swatch-btn';
     b.innerHTML = '<span></span>';
     let live = false;
-    b.addEventListener('click', () => {
+    b.addEventListener('click', async () => {
       const paint = getPaint();
       if (!paint) return;
+      if (paint.type === 'image') { const asset = await onPickImage?.(); if (asset) { editor.assets.set(asset.id, asset); editor.update(ids(), n => ({ fills: n.fills.map(f => f === paintOf(n, paint) ? { ...f, asset: asset.id } : f) })); } return; }
       openColorPicker(b, {
         paint, gradients, opacity, documentColors: documentColors(),
         onChange: p => { if (!live) { live = true; editor.begin(); } apply(p); },
         onClose: () => { if (live) { live = false; editor.commit(); editor.emit({ doc: true }); } }
       });
     });
-    const refresh = () => { const p = getPaint(); b.firstChild.style.background = p ? paintCss(p) : ''; b.classList.toggle('mixed', !p); };
+    const refresh = () => {
+      const p = getPaint();
+      const a = p?.type === 'image' && editor.assets.get(p.asset);
+      b.firstChild.style.background = a ? `center / cover no-repeat url("${assetUrl(a)}")` : p ? paintCss(p) : '';
+      b.classList.toggle('mixed', !p);
+    };
     refreshers.push(refresh);
     return b;
   }
+
+  // The same fill in another layer of the selection (same place in the list).
+  const paintOf = (n, p) => n.fills[nodes()[0].fills.indexOf(p)];
 
   // A hex field for a solid colour; set(hex) makes it one undo step.
   function hexField(get, set) {
@@ -272,7 +283,13 @@ export function attachProperties(root, editor, { fonts, onExport }) {
   };
   const listItem = (...rows) => { const d = document.createElement('div'); d.className = 'list-item'; d.append(...rows); return d; };
 
-  const fillsSection = () => listSection('Fill', 'fills', {
+  const fillsSection = () => {
+    const s = fillsList();
+    const pick = iconButton('image', 'Add image', async () => { const a = await onPickImage?.(); if (a) editor.setImageFill(a); });
+    s.querySelector('.section-head').insertBefore(pick, s.querySelector('.section-head').lastChild);
+    return s;
+  };
+  const fillsList = () => listSection('Fill', 'fills', {
     addLabel: 'Add fill',
     make: list => solid(list.length ? '#000000' : '#d9d9d9', list.length ? 0.2 : 1),
     rowFor: (i, setList) => {
@@ -281,16 +298,20 @@ export function attachProperties(root, editor, { fonts, onExport }) {
       const label = document.createElement('span');
       label.className = 'paint-label';
       const hex = hexField(() => get()?.color, hex => setList(list => { list[i].color = hex; return list; }));
+      const fit = document.createElement('select');
+      for (const [v, l] of [['fill', 'Fill'], ['fit', 'Fit'], ['stretch', 'Stretch'], ['tile', 'Tile']]) fit.add(new Option(t(l), v));
+      fit.addEventListener('change', () => setList(list => { list[i].fit = fit.value; return list; }));
+      fit.addEventListener('keydown', e => e.stopPropagation());
       refreshers.push(() => {
         const p = get(); if (!p) return;
-        const isSolid = p.type === 'solid';
-        hex.hidden = !isSolid; label.hidden = isSolid;
+        hex.hidden = p.type !== 'solid'; fit.hidden = p.type !== 'image'; label.hidden = p.type === 'solid' || p.type === 'image';
+        if (p.type === 'image') fit.value = p.fit;
         label.textContent = t(p.type === 'linear' ? 'Linear' : 'Radial');
       });
       label.addEventListener('click', () => sw.click());
       const op = itemNumber('fills', i, 'opacity', '', { min: 0, max: 1, scale: 100, suffix: '%' });
       op.classList.add('narrow');
-      return listItem(row(sw, hex, label, op, ...rowTail('fills', i, setList)));
+      return listItem(row(sw, hex, label, fit, op, ...rowTail('fills', i, setList)));
     }
   });
 
@@ -366,6 +387,80 @@ export function attachProperties(root, editor, { fonts, onExport }) {
     return s;
   };
 
+  // ---------- auto layout, sizing, constraints ----------
+  function layoutSection() {
+    const frames = nodes();
+    const has = frames.every(n => n.layout);
+    const action = has
+      ? iconButton('minus', 'Remove auto layout', () => editor.removeAutoLayout())
+      : iconButton('plus', 'Add auto layout', () => editor.addAutoLayout());
+    if (!has) return section('Auto layout', frames.some(n => n.layout) ? Object.assign(document.createElement('p'), { className: 'hint mixed-hint', textContent: t('Mixed') }) : null, action);
+    const lnum = (label, title, get, set, opts = {}) => number({ label, title, min: 0, ...opts, get: n => get(n.layout), set: (n, v) => ({ layout: { ...n.layout, ...set(n.layout, v) } }) });
+    const dir = segmented([
+      { value: 'row', icon: 'dir-row', title: 'Horizontal' }, { value: 'column', icon: 'dir-column', title: 'Vertical' }
+    ], n => n.layout.mode, (n, v) => ({ layout: { ...n.layout, mode: v } }));
+    const gap = lnum('⇹', 'Gap between layers', l => l.gap, (l, v) => ({ gap: v }), { min: -10000 });
+    const padH = lnum('↔', 'Padding left and right', l => l.padding.l === l.padding.r ? l.padding.l : NaN, (l, v) => ({ padding: { ...l.padding, l: v, r: v } }));
+    const padV = lnum('↕', 'Padding top and bottom', l => l.padding.t === l.padding.b ? l.padding.t : NaN, (l, v) => ({ padding: { ...l.padding, t: v, b: v } }));
+    // Nine dots: where the content sits in the frame (along and across the direction).
+    const grid = document.createElement('div');
+    grid.className = 'align-grid';
+    grid.title = t('Alignment');
+    const order = ['start', 'center', 'end'];
+    const cells = [];
+    for (let y = 0; y < 3; y++) for (let x = 0; x < 3; x++) {
+      const c = document.createElement('button');
+      c.className = 'cell';
+      c.addEventListener('click', () => editor.setLayout(l => {
+        const [main, cross] = l.mode === 'row' ? [order[x], order[y]] : [order[y], order[x]];
+        return { justify: l.justify === 'space-between' ? 'space-between' : main, align: cross };
+      }));
+      cells.push({ c, x, y });
+      grid.append(c);
+    }
+    refreshers.push(() => {
+      const l = nodes()[0]?.layout; if (!l) return;
+      const main = order.indexOf(l.justify), cross = order.indexOf(l.align);
+      for (const { c, x, y } of cells) {
+        const [mx, cy] = l.mode === 'row' ? [x, y] : [y, x];
+        c.classList.toggle('on', (l.justify === 'space-between' || mx === main) && cy === cross);
+      }
+    });
+    const between = checkbox('Space between', n => n.layout.justify === 'space-between', (n, v) => ({ layout: { ...n.layout, justify: v ? 'space-between' : 'start' } }));
+    return section('Auto layout', [row(dir, gap), row(padH, padV), row(grid, between)], action);
+  }
+
+  // Fixed / Hug / Fill for width and height, where they make sense.
+  function sizingRow() {
+    const sel = nodes();
+    const parents = sel.map(n => editor.index.get(n.id)?.parent);
+    const canFill = sel.every((n, i) => inFlow(n, parents[i]));
+    const canHug = sel.every(n => n.layout);
+    if (!canFill && !canHug) return null;
+    const opts = [['fixed', t('Fixed')], ...(canHug ? [['hug', t('Hug')]] : []), ...(canFill ? [['fill', t('Fill')]] : [])];
+    const pick = (axis, label) => {
+      const key = axis === 'w' ? 'widthMode' : 'heightMode';
+      const el = select(opts, n => n[key], (n, v) => ({ [key]: v, ...(n.type === 'text' && axis === 'w' && v !== 'fixed' && n.sizing === 'auto-width' ? { sizing: 'auto-height' } : {}) }));
+      const wrap = document.createElement('label');
+      wrap.className = 'mode-pick';
+      wrap.append(Object.assign(document.createElement('span'), { className: 'lbl', textContent: label }), el);
+      return wrap;
+    };
+    return row(pick('w', 'W'), pick('h', 'H'));
+  }
+
+  function constraintsSection() {
+    const sel = nodes();
+    const ok = sel.every(n => { const p = editor.index.get(n.id)?.parent; return p?.type === 'frame' && !inFlow(n, p); });
+    if (!ok) return null;
+    const h = select([['left', t('Left')], ['right', t('Right')], ['stretch', t('Left and right')], ['center', t('Center')], ['scale', t('Scale')]],
+      n => n.constraints.h, (n, v) => ({ constraints: { ...n.constraints, h: v } }));
+    const v = select([['top', t('Top')], ['bottom', t('Bottom')], ['stretch', t('Top and bottom')], ['center', t('Center')], ['scale', t('Scale')]],
+      n => n.constraints.v, (n, x) => ({ constraints: { ...n.constraints, v: x } }));
+    return section('Constraints', [row(Object.assign(document.createElement('span'), { className: 'muted cap', textContent: '↔' }), h),
+      row(Object.assign(document.createElement('span'), { className: 'muted cap', textContent: '↕' }), v)]);
+  }
+
   function alignSection() {
     const n = nodes().length;
     const single = n === 1 && editor.index.get(ids()[0])?.parent;
@@ -418,7 +513,8 @@ export function attachProperties(root, editor, { fonts, onExport }) {
       const only = type => types.size === 1 && types.has(type);
       const head = document.createElement('div');
       head.className = 'prop-title';
-      head.textContent = sel.length === 1 ? t(typeLabel[sel[0].type]) : t('{0} layers', sel.length);
+      head.innerHTML = sel.length === 1 ? icon(sel[0].layout ? 'auto-layout' : sel[0].type) : icon('group');
+      head.append(sel.length === 1 ? t(sel[0].layout ? 'Auto layout' : typeLabel[sel[0].type]) : t('{0} layers', sel.length));
       parts.push(head);
       const bar = alignSection();
       if (bar) parts.push(bar);
@@ -443,10 +539,16 @@ export function attachProperties(root, editor, { fonts, onExport }) {
       parts.push(section('Position', [
         row(number({ label: 'X', get: n => n.x, set: (n, v) => ({ x: v }) }), number({ label: 'Y', get: n => n.y, set: (n, v) => ({ y: v }) })),
         types.has('group') ? null : row(
-          number({ label: 'W', min: 1, get: n => n.w, set: (n, v) => ({ w: v, ...(n.type === 'text' && n.sizing === 'auto-width' ? { sizing: 'auto-height' } : {}) }) }),
-          number({ label: 'H', min: 1, get: n => n.h, set: (n, v) => ({ h: v, ...(n.type === 'text' ? { sizing: 'fixed' } : {}) }) })
-        )
+          number({ label: 'W', min: 1, get: n => n.w, set: (n, v) => ({ w: v, widthMode: 'fixed', ...(n.type === 'text' && n.sizing === 'auto-width' ? { sizing: 'auto-height' } : {}) }) }),
+          number({ label: 'H', min: 1, get: n => n.h, set: (n, v) => ({ h: v, heightMode: 'fixed', ...(n.type === 'text' ? { sizing: 'fixed' } : {}) }) })
+        ),
+        types.has('group') ? null : sizingRow(),
+        sel.every(n => editor.index.get(n.id)?.parent?.layout)
+          ? row(checkbox('Ignore auto layout', n => !!n.absolute, (n, v) => ({ absolute: v }))) : null
       ]));
+      if (only('frame')) parts.push(layoutSection());
+      const cons = constraintsSection();
+      if (cons) parts.push(cons);
 
       const radius = [...types].every(x => x === 'rect' || x === 'frame');
       parts.push(section('Appearance', row(
@@ -481,7 +583,9 @@ export function attachProperties(root, editor, { fonts, onExport }) {
 
   editor.addEventListener('change', ({ what }) => {
     if (!editor.doc) return;
-    const sig = `${editor.pageId}|${editor.tool}|${editor.selection.join(',')}|${editor.selectedNodes.map(n => n.type).join(',')}`;
+    // Rebuilt when what the panel shows changes: other layers, or auto layout switched on or off (here or around).
+    const shape = n => `${n.type}${n.layout ? ':L' : ''}${editor.index.get(n.id)?.parent?.layout ? ':P' : ''}`;
+    const sig = `${editor.pageId}|${editor.tool}|${editor.selection.join(',')}|${editor.selectedNodes.map(shape).join(',')}`;
     if (sig !== signature || what.page) { signature = sig; build(); }
     else if (what.doc) refresh();
   });

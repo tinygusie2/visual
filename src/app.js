@@ -1,10 +1,12 @@
 // Entry point of the editor page: wires the editor state to the canvas, panels, top bar, tools, shortcuts and files.
-import { parseDocument, serializeDocument } from './core/document.js';
+import { absolute, parseDocument, serializeDocument } from './core/document.js';
 import { gradient, solid, stroke } from './core/paint.js';
 import { attachCanvas } from './editor/canvas.js';
 import { Editor } from './editor/editor.js';
 import { attachTextEditor } from './editor/textedit.js';
 import { exportNode } from './render/export.js';
+import { imageMime, makeAsset } from './render/images.js';
+import { importSvg } from './editor/svgimport.js';
 import { Renderer } from './render/renderer.js';
 import { closeColorPicker } from './ui/colorpicker.js';
 import { lang, t } from './ui/i18n.js';
@@ -35,10 +37,13 @@ const fonts = {
 $('#logo').innerHTML = wink(20);
 const canvas = $('#canvas');
 const renderer = new Renderer(canvas, editor);
-const canvasApi = attachCanvas(canvas, editor, renderer, { onContextMenu: point => showMenu(point, contextMenu()) });
+const canvasApi = attachCanvas(canvas, editor, renderer, {
+  onContextMenu: point => showMenu(point, contextMenu()),
+  onDropFiles: async (files, at) => importFiles(await Promise.all(files.map(async f => ({ name: f.name, data: await f.arrayBuffer() }))), at)
+});
 attachTextEditor($('#stage'), editor);
 attachLayers($('#left'), editor);
-attachProperties($('#right'), editor, { fonts, onExport: nodes => exportLayers(nodes) });
+attachProperties($('#right'), editor, { fonts, onExport: nodes => exportLayers(nodes), onPickImage: pickImage });
 new ResizeObserver(() => { editor.viewport = { w: canvas.clientWidth, h: canvas.clientHeight }; }).observe(canvas);
 editor.viewport = { w: canvas.clientWidth || 1200, h: canvas.clientHeight || 800 };
 
@@ -49,7 +54,13 @@ $('#toolbar').replaceChildren(...tools.map(([id, label, key]) => {
   b.innerHTML = icon(id);
   b.addEventListener('click', () => editor.setTool(id));
   return b;
-}));
+}), Object.assign(document.createElement('span'), { className: 'tool-sep' }), (() => {
+  const b = document.createElement('button');
+  b.className = 'icon tool'; b.title = `${t('Place image or SVG…')}  (Ctrl+Shift+K)`;
+  b.innerHTML = icon('image');
+  b.addEventListener('click', () => placeFromDialog());
+  return b;
+})());
 
 editor.addEventListener('change', ({ what }) => {
   renderer.request();
@@ -61,6 +72,7 @@ editor.addEventListener('change', ({ what }) => {
   if (what.file || what.doc) {
     $('#doc-name').textContent = editor.doc?.name || '';
     $('#dirty').hidden = !editor.dirty;
+    $('#doc-name').classList.toggle('dirty', editor.dirty);
     document.title = editor.doc ? `${editor.dirty ? '• ' : ''}${editor.doc.name} · Visual` : 'Visual';
   }
 });
@@ -84,6 +96,7 @@ async function confirmDiscard() {
     buttons: [t('Save'), t('Don’t save'), t('Cancel')]
   });
   if (answer === 'save') return save();
+  if (answer === 'discard') recovery.clear();
   return answer === 'discard';
 }
 
@@ -116,13 +129,110 @@ async function save(as = false) {
     // A design saved for the first time takes its file name as its name.
     const fileName = path.split(/[\\/]/).pop().replace(/\.visual$/i, '');
     if (!editor.path || as) editor.doc.name = fileName;
-    await host.save(path, serializeDocument(editor.doc));
+    await host.save(path, serializeDocument(editor.doc, editor.assets));
     editor.markSaved(path);
+    recovery.clear();
     editor.emit({ doc: false, file: true });
     toast(t('Saved'));
     return true;
   } catch (err) { toast(t('Could not save: {0}', err.message), 'error'); return false; }
 }
+
+// ---------- autosave for recovery ----------
+// A few seconds after a change, the design is written to Visual's recovery folder (never over your own file). If
+// Visual or the PC crashes, the start screen offers it back next time.
+const recovery = {
+  timer: null, docId: null,
+  schedule() {
+    if (!editor.doc || !editor.dirty) return;
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.write(), 3000);
+  },
+  async write() {
+    this.timer = null;
+    if (!editor.doc || !editor.dirty) return;
+    this.docId = editor.doc.id;
+    try { await host.recoveryWrite(editor.doc.id, { name: editor.doc.name, path: editor.path }, serializeDocument(editor.doc, editor.assets)); } catch {}
+  },
+  clear() {
+    clearTimeout(this.timer); this.timer = null;
+    const id = editor.doc?.id || this.docId;
+    if (id) host.recoveryRemove(id);
+  }
+};
+editor.addEventListener('change', ({ what }) => { if (what.doc || what.file) recovery.schedule(); });
+
+async function restoreRecovered(meta) {
+  if (!(await confirmDiscard())) return;
+  try {
+    editor.load(parseDocument(await host.recoveryRead(meta.id)), meta.path || null);
+    editor.dirty = true; editor.emit({ file: true });
+    showEditor();
+    toast(t('Restored “{0}”. Save it to keep it.', meta.name));
+  } catch (err) { toast(t('Could not open {0}: {1}', meta.name, err.message), 'error'); }
+}
+
+// ---------- placing images and SVG ----------
+// files: [{ name, data: ArrayBuffer | Uint8Array }] → images become image layers, SVG files editable layers.
+async function importFiles(files, at) {
+  if (!editor.doc || !files.length) return;
+  const images = [];
+  for (const f of files) {
+    try {
+      if (/\.svg$/i.test(f.name)) {
+        const frame = importSvg(new TextDecoder().decode(f.data), f.name.replace(/\.svg$/i, ''));
+        editor.importNodes([frame], at);
+      } else if (imageMime(f.name)) images.push(await makeAsset(f.data, imageMime(f.name), f.name.replace(/\.[^.]+$/, '')));
+      else toast(t('{0} is not an image or SVG file', f.name), 'error');
+    } catch (err) { toast(t('Could not place {0}: {1}', f.name, err.message), 'error'); }
+  }
+  if (images.length) editor.placeImages(images, at);
+  editor.setTool('move');
+}
+async function placeFromDialog() {
+  if (!editor.doc) return;
+  const files = await host.importDialog(t('Place image or SVG…'));
+  if (files?.length) importFiles(files);
+}
+// For an image fill: one picture, chosen in a dialog.
+async function pickImage() {
+  const files = (await host.importDialog(t('Choose image'))).filter(f => imageMime(f.name));
+  if (!files.length) return null;
+  try { return await makeAsset(files[0].data, imageMime(files[0].name), files[0].name.replace(/\.[^.]+$/, '')); }
+  catch (err) { toast(t('Could not place {0}: {1}', files[0].name, err.message), 'error'); return null; }
+}
+
+// ---------- system clipboard: layers between windows and designs, images and SVG from other apps ----------
+window.addEventListener('copy', e => {
+  if (!editor.doc || typing(document.activeElement)) return;
+  if (!editor.copy()) return;
+  e.preventDefault();
+  const payload = JSON.stringify(editor.clipboardPayload());
+  e.clipboardData.setData('text/plain', payload);
+});
+window.addEventListener('cut', e => {
+  if (!editor.doc || typing(document.activeElement) || !editor.selection.length) return;
+  e.preventDefault();
+  editor.copy();
+  e.clipboardData.setData('text/plain', JSON.stringify(editor.clipboardPayload()));
+  editor.deleteSelection();
+});
+window.addEventListener('paste', async e => {
+  if (!editor.doc || typing(document.activeElement)) return;
+  e.preventDefault();
+  const files = [...e.clipboardData.files];
+  const text = e.clipboardData.getData('text/plain');
+  if (text.startsWith('{"format":"visual-layers"')) {
+    try { editor.takeClipboard(JSON.parse(text)); } catch {}
+    return editor.paste();
+  }
+  if (files.length) {
+    const data = await Promise.all(files.map(async f => ({ name: f.name || `Pasted image.${(f.type.split('/')[1] || 'png')}`, data: await f.arrayBuffer() })));
+    return importFiles(data);
+  }
+  if (/^\s*(<\?xml[^>]*>\s*)?<svg[\s>]/i.test(text)) return importFiles([{ name: 'Pasted SVG.svg', data: new TextEncoder().encode(text) }]);
+  editor.paste();
+});
 
 // ---------- export and copy as ----------
 // Every export setting of every layer; a layer without settings exports as PNG 1×. One folder for all files.
@@ -130,7 +240,7 @@ async function exportLayers(nodes = editor.selectedNodes, folder) {
   if (!nodes.length) return null;
   try {
     const files = [];
-    for (const node of nodes) for (const e of node.exports.length ? node.exports : [{ format: 'png', scale: 1 }]) files.push(await exportNode(node, e));
+    for (const node of nodes) for (const e of node.exports.length ? node.exports : [{ format: 'png', scale: 1 }]) files.push(await exportNode(node, { ...e, assets: editor.assets }));
     const done = await host.exportFiles(files, t('Export to folder'), folder);
     if (done && !folder) toast(t('Exported {0} files to {1}', done.names.length, done.folder));
     return done;
@@ -140,7 +250,7 @@ async function exportLayers(nodes = editor.selectedNodes, folder) {
 async function copyAs(format) {
   const [node] = editor.selectedNodes;
   if (!node) return;
-  const file = await exportNode(node, { format, scale: format === 'png' ? 2 : 1 });
+  const file = await exportNode(node, { format, scale: format === 'png' ? 2 : 1, assets: editor.assets });
   if (format === 'svg') await host.copyText(file.data); else await host.copyImage(file.data);
   toast(t(format === 'svg' ? 'Copied as SVG' : 'Copied as PNG'));
 }
@@ -156,6 +266,9 @@ function contextMenu() {
     { label: 'Group selection', shortcut: 'Ctrl+G', action: () => editor.wrap('group'), disabled: !has },
     { label: 'Frame selection', shortcut: 'Ctrl+Alt+G', action: () => editor.wrap('frame'), disabled: !has },
     { label: 'Ungroup', shortcut: 'Ctrl+Shift+G', action: () => editor.unwrap(), disabled: !sel.some(n => n.children) },
+    sel.length === 1 && sel[0].layout
+      ? { label: 'Remove auto layout', shortcut: 'Alt+Shift+A', action: () => editor.removeAutoLayout() }
+      : { label: 'Add auto layout', shortcut: 'Shift+A', action: () => editor.addAutoLayout(), disabled: !has },
     '-',
     { label: 'Bring to front', shortcut: 'Ctrl+Shift+]', action: () => editor.arrange(Infinity), disabled: !has },
     { label: 'Bring forward', shortcut: 'Ctrl+]', action: () => editor.arrange(1), disabled: !has },
@@ -175,7 +288,7 @@ function contextMenu() {
 
 async function closeDesign() {
   if (!(await confirmDiscard())) return;
-  editor.doc = null; editor.path = null; editor.dirty = false;
+  editor.doc = null; editor.path = null; editor.dirty = false; editor.assets = new Map();
   document.body.classList.remove('has-doc');
   document.title = 'Visual';
   start.show();
@@ -184,7 +297,7 @@ async function closeDesign() {
 host.onRequestClose(async () => { if (await confirmDiscard()) host.closeWindow(); });
 host.onOpenPath(path => openPath(path));
 
-const start = attachStart($('#start'), { onTemplate: newFromTemplate, onOpen: openDialog, onOpenPath: openPath });
+const start = attachStart($('#start'), { onTemplate: newFromTemplate, onOpen: openDialog, onOpenPath: openPath, onRecover: restoreRecovered });
 
 // ---------- top bar ----------
 const appMenu = () => [
@@ -196,6 +309,7 @@ const appMenu = () => [
   { label: 'Show in folder', action: () => host.showInFolder(editor.path), disabled: !editor.path },
   { label: 'Close design', action: closeDesign, disabled: !editor.doc },
   { label: 'Export…', shortcut: 'Ctrl+Shift+E', action: () => exportLayers(), disabled: !editor.selection.length },
+  { label: 'Place image or SVG…', shortcut: 'Ctrl+Shift+K', action: placeFromDialog, disabled: !editor.doc },
   '-',
   { label: 'Undo', shortcut: 'Ctrl+Z', action: () => editor.undo(), disabled: !editor.history.canUndo },
   { label: 'Redo', shortcut: 'Ctrl+Shift+Z', action: () => editor.redo(), disabled: !editor.history.canRedo },
@@ -241,9 +355,9 @@ window.addEventListener('keydown', e => {
     if (e.shiftKey && k === 'e') return handled(), exportLayers();
     if (e.shiftKey && k === 'c') return handled(), copyAs('png');
     if (k === 'a') return handled(), editor.selectAll();
-    if (k === 'c') return handled(), editor.copy();
-    if (k === 'x') return handled(), editor.cut();
-    if (k === 'v') return handled(), editor.paste();
+    if (e.shiftKey && k === 'k') return handled(), placeFromDialog();
+    // Ctrl+C / X / V: handled by the copy, cut and paste events (system clipboard).
+    if (k === 'c' || k === 'x' || k === 'v') return;
     if (e.key === ']') return handled(), editor.arrange(e.shiftKey ? Infinity : 1);
     if (e.key === '[') return handled(), editor.arrange(e.shiftKey ? -Infinity : -1);
     if (k === '=' || k === '+') return handled(), editor.zoomBy(2);
@@ -260,6 +374,7 @@ window.addEventListener('keydown', e => {
   const alignKeys = { KeyA: 'left', KeyD: 'right', KeyW: 'top', KeyS: 'bottom', KeyH: 'center', KeyV: 'middle' };
   if (e.altKey && alignKeys[e.code]) return handled(), editor.align(alignKeys[e.code]);
   if (e.altKey && e.shiftKey && e.code === 'KeyT') return handled(), editor.tidyUp();
+  if (e.shiftKey && e.code === 'KeyA') return handled(), e.altKey ? editor.removeAutoLayout() : editor.addAutoLayout();
   const toolKeys = { v: 'move', f: 'frame', r: 'rect', o: 'ellipse', t: 'text' };
   if (toolKeys[k] && !e.altKey) return handled(), editor.setTool(toolKeys[k]);
   if (e.key === 'Escape') {
@@ -288,7 +403,8 @@ const shortcutGroups = [
     ['Ctrl+C / Ctrl+V', 'Copy / paste'], ['Ctrl+] / Ctrl+[', 'Bring forward / send backward'], ['Esc', 'Select parent'], ['Enter', 'Select the layer inside / edit text'],
     ['Ctrl+Shift+H / L', 'Hide / lock'], ['Ctrl+G / Ctrl+Shift+G', 'Group / ungroup'], ['Ctrl+Alt+G', 'Frame selection'],
     ['Alt+A D W S H V', 'Align'], ['Ctrl + drag', 'Place without snapping'], ['Alt + hover', 'Measure distances'],
-    ['Ctrl+Shift+E', 'Export…'], ['Ctrl+Shift+C', 'Copy as PNG']]]
+    ['Ctrl+Shift+E', 'Export…'], ['Ctrl+Shift+C', 'Copy as PNG'], ['Shift+A / Alt+Shift+A', 'Add / remove auto layout'],
+    ['Ctrl+Shift+K', 'Place image or SVG…']]]
 ];
 $('#shortcuts').innerHTML = `<h2>${t('Keyboard shortcuts')}</h2><div class="shortcut-cols">${shortcutGroups.map(([title, rows]) =>
   `<div><h3>${t(title)}</h3><dl>${rows.map(([keys, what]) => `<dt>${t(keys)}</dt><dd>${t(what)}</dd>`).join('')}</dl></div>`).join('')}</div>
@@ -416,11 +532,86 @@ window.__visual = {
     const exported = await exportLayers([node(cardId)], path.replace(/\.visual$/i, '-export'));
     checks.exported = exported?.names.join(',') === 'Rectangle@2x.png,Rectangle.svg';
 
+    // ---------- step 3: auto layout, constraints, images, SVG import, clipboard, recovery ----------
+    const firstPage = editor.pageId;
+    editor.addPage('Step 3');
+    editor.zoomTo(1);
+    const c = editor.viewCenter();
+    editor.transact(() => {
+      const a = editor.addNode('rect', { name: 'A', x: c.x - 150, y: c.y, w: 80, h: 60 });
+      const b = editor.addNode('rect', { name: 'B', x: c.x - 40, y: c.y, w: 80, h: 60 });
+      const d = editor.addNode('rect', { name: 'C', x: c.x + 70, y: c.y, w: 80, h: 60 });
+      editor.selection = [a.id, b.id, d.id];
+    });
+    editor.addAutoLayout();
+    const list = editor.selectedNodes[0];
+    checks.autoLayout = list?.layout?.mode === 'row' && list.layout.gap === 30 && list.widthMode === 'hug' && list.w === 300 && list.children.map(n => n.name).join('') === 'ABC';
+    // Drag A past C: it moves to the end, the others close up.
+    const L = () => editor.node(list.id);
+    const abs = n => absolute(editor.index, n.id);
+    const cam3 = editor.camera;
+    const at3 = (x, y) => { const b = canvas.getBoundingClientRect(); return { clientX: b.left + (x - cam3.x) * cam3.zoom, clientY: b.top + (y - cam3.y) * cam3.zoom }; };
+    const fire3 = (type, x, y) => canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 3, button: 0, buttons: 1, ...at3(x, y) }));
+    editor.clearSelection();
+    const pa = abs(L().children[0]);
+    fire3('pointerdown', pa.x + 40, pa.y + 30); fire3('pointermove', pa.x + 120, pa.y + 30); fire3('pointermove', pa.x + 290, pa.y + 30);
+    checks.dropLine = !!editor.drag?.dropLine && editor.floating.size === 1;
+    fire3('pointerup', pa.x + 290, pa.y + 30);
+    checks.reordered = L().children.map(n => n.name).join('') === 'BCA' && L().children[0].x === 0 && editor.floating.size === 0;
+    editor.update([L().children[1].id], { widthMode: 'fill' });
+    editor.update([list.id], { w: 400, widthMode: 'fixed' });
+    checks.fill = L().children[1].w === 180 && L().children[2].x === 320;
+    editor.undo(); editor.undo();
+    // Constraints: a layer pinned right stays 10 px from the right edge.
+    const box3 = editor.addNode('frame', { name: 'Box', x: c.x - 100, y: c.y + 120, w: 200, h: 100 });
+    editor.transact(() => { editor.addNode('rect', { name: 'Pin', x: c.x + 50, y: c.y + 130, w: 40, h: 20, constraints: { h: 'right', v: 'top' } }, editor.node(box3.id)); });
+    editor.update([box3.id], { w: 300 });
+    const pin = editor.node(box3.id).children[0];
+    checks.constraints = pin.x + pin.w === 290;
+
+    // An SVG: a rectangle, a rotated square (becomes a path), a circle, a line and text.
+    const svgText = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 60 40">
+      <rect x="2" y="2" width="20" height="10" rx="2" fill="#ff0000"/><rect x="30" y="4" width="8" height="8" fill="#00ff00" transform="rotate(45 34 8)"/>
+      <circle cx="10" cy="28" r="6" fill="#0000ff" stroke="#000" stroke-width="1"/><path d="M30 30 h20" stroke="#333" stroke-width="2"/>
+      <text x="40" y="36" font-size="6" fill="#123456">Hi</text><script>alert(1)</script></svg>`;
+    await importFiles([{ name: 'shapes.svg', data: new TextEncoder().encode(svgText) }], { x: c.x, y: c.y + 320 });
+    const svgFrame = editor.selectedNodes[0];
+    const kinds = svgFrame?.children.map(n => n.type).join(',');
+    checks.svgImport = svgFrame?.w === 120 && kinds === 'rect,vector,ellipse,vector,text' && svgFrame.children[0].w === 40 && svgFrame.children[0].radius === 4
+      && svgFrame.children[2].strokes[0].width === 2 && svgFrame.children[4].text === 'Hi';
+
+    // An image: a 40 × 20 PNG made here, placed, drawn and exported.
+    const png = document.createElement('canvas'); png.width = 40; png.height = 20;
+    const pctx = png.getContext('2d'); pctx.fillStyle = '#ff0000'; pctx.fillRect(0, 0, 20, 20); pctx.fillStyle = '#0000ff'; pctx.fillRect(20, 0, 20, 20);
+    const pngData = await (await new Promise(r => png.toBlob(r, 'image/png'))).arrayBuffer();
+    await importFiles([{ name: 'photo.png', data: pngData }], { x: c.x + 250, y: c.y + 320 });
+    const pic3 = editor.selectedNodes[0];
+    checks.imagePlaced = pic3?.fills[0]?.type === 'image' && pic3.w === 40 && editor.assets.has(pic3.fills[0].asset);
+    const drawn = await renderCanvas(pic3, 1, { assets: editor.assets });
+    const px3 = (x, y) => [...drawn.getContext('2d').getImageData(x, y, 1, 1).data];
+    checks.imageDrawn = px3(5, 10)[0] > 200 && px3(35, 10)[2] > 200;
+
+    // Copy and paste through the system clipboard format (as between two windows).
+    editor.select([pic3.id]); editor.copy();
+    const payload = JSON.parse(JSON.stringify(editor.clipboardPayload()));
+    editor.clipboard = null;
+    editor.takeClipboard(payload); editor.paste();
+    checks.clipboard = editor.selectedNodes[0]?.fills[0]?.asset === pic3.fills[0].asset && editor.selectedNodes[0].id !== pic3.id;
+
+    // Recovery: written after a change, readable, gone after it is cleared.
+    await recovery.write();
+    const rec = parseDocument(await host.recoveryRead(editor.doc.id));
+    checks.recovery = rec.pages.length === editor.doc.pages.length && Object.keys(rec.assets).length === 1;
+    const step3Page = editor.pageId;
+    editor.setPage(firstPage);
+
     const ids = JSON.stringify(editor.page.children[0].children.map(n => n.id));
     editor.select([editor.page.children[0].children[0].id]);
-    const saved = await host.save(path, serializeDocument(editor.doc));
+    const saved = await host.save(path, serializeDocument(editor.doc, editor.assets));
     const back = parseDocument((await host.read(saved)).text);
     checks.idsSurviveSave = JSON.stringify(back.pages[0].children[0].children.map(n => n.id)) === ids;
+    checks.assetsSurviveSave = Object.keys(back.assets).length === 1 && back.pages.find(pg => pg.id === step3Page).children.length === 5;
+    recovery.clear();
     checks.layers = document.querySelectorAll('#left .layer').length;
     checks.props = document.querySelectorAll('#right .prop-section').length;
     // Leave the window mid-drag with the colour picker open, so a screenshot shows guides, distances and the picker.

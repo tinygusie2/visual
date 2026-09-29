@@ -1,7 +1,7 @@
 // Electron shell: files, native dialogs, recent projects. The editor itself lives in the page (src/).
 // The page is served from app://visual/ instead of file:// so its ES modules load like on a web server.
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, protocol, session, shell } from 'electron';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, extname, join, normalize, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -75,6 +75,37 @@ ipcMain.handle('export-files', async (_e, files, title, folder) => {
   for (const f of files) writeFileSync(join(folder, basename(f.name)), typeof f.data === 'string' ? f.data : Buffer.from(f.data));
   return { folder, names: files.map(f => basename(f.name)) };
 });
+// Images and SVG files to place: [{ name, data }].
+ipcMain.handle('import-dialog', async (_e, title) => {
+  const r = await dialog.showOpenDialog(win, {
+    title, properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'Images and SVG', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif', 'svg'] }]
+  });
+  return r.filePaths.map(p => ({ name: basename(p), data: readFileSync(p) }));
+});
+
+// ---------- recovery: the open design is written here a few seconds after each change ----------
+// Removed when the design is saved or its changes are thrown away; anything left at start came from a crash.
+const recoveryDir = join(settingsDir, 'recovery');
+const recoveryFile = id => join(recoveryDir, `${String(id).replace(/[^\w-]/g, '')}.visual`);
+ipcMain.handle('recovery-write', (_e, id, meta, text) => {
+  mkdirSync(recoveryDir, { recursive: true });
+  const file = recoveryFile(id);
+  writeFileSync(`${file}.saving`, text); renameSync(`${file}.saving`, file);
+  writeFileSync(`${file}.json`, JSON.stringify({ ...meta, id, time: new Date().toISOString() }));
+});
+ipcMain.handle('recovery-remove', (_e, id) => { for (const f of [recoveryFile(id), `${recoveryFile(id)}.json`]) rmSync(f, { force: true }); });
+ipcMain.handle('recovery-read', (_e, id) => readFileSync(recoveryFile(id), 'utf8'));
+const startupRecovery = (() => {
+  try {
+    return readdirSync(recoveryDir).filter(f => f.endsWith('.visual.json'))
+      .map(f => { try { return JSON.parse(readFileSync(join(recoveryDir, f), 'utf8')); } catch { return null; } })
+      .filter(m => m && existsSync(recoveryFile(m.id)));
+  } catch { return []; }
+})();
+// Only what was there when Visual started: this session's own recovery files are not "recovered".
+ipcMain.handle('recovery-list', () => startupRecovery.filter(m => existsSync(recoveryFile(m.id))));
+
 ipcMain.handle('open-folder', (_e, folder) => shell.openPath(folder));
 ipcMain.handle('clipboard-image', (_e, data) => clipboard.writeImage(nativeImage.createFromBuffer(Buffer.from(data))));
 ipcMain.handle('clipboard-text', (_e, text) => clipboard.writeText(text));
@@ -139,6 +170,14 @@ async function runSmoke() {
     win.show();
     await new Promise(r => setTimeout(r, 1200));
     writeFileSync(shot, (await win.webContents.capturePage()).toPNG());
+    // --page-shot path: the second page too (auto layout, imported SVG, image), with the list frame selected.
+    const pageShot = process.argv.includes('--page-shot') && process.argv[process.argv.indexOf('--page-shot') + 1];
+    if (pageShot) {
+      await win.webContents.executeJavaScript(`(() => { const v = window.__visual; v.editor.drag = null; v.editor.floating.clear(); v.editor.guides = []; v.editor.measures = [];
+        v.editor.setPage(v.editor.doc.pages[1].id); v.editor.zoomToFit(); v.editor.select([v.editor.page.children[0].id]); })()`);
+      await new Promise(r => setTimeout(r, 600));
+      writeFileSync(pageShot, (await win.webContents.capturePage()).toPNG());
+    }
   }
   // Its own files; the settings folder only when it is the temporary one made for the check.
   const temporary = [out, out.replace(/\.visual$/i, '-export'), ...(process.env.VISUAL_HOME ? [] : [settingsDir])];

@@ -42,7 +42,7 @@ test('version 1 files get fills, strokes, effects and exports', () => {
   assert.deepEqual(n.fills, [solid('#123456')]);
   assert.equal(n.fill, undefined);
   assert.deepEqual([n.strokes, n.effects, n.exports], [[], [], []]);
-  assert.equal(doc.version, 2);
+  assert.equal(doc.version, 3);
 });
 
 test('groups take the size of their content without moving anything', () => {

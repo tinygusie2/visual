@@ -50,6 +50,17 @@ const nl = {
   'Send to back': 'Naar achtergrond', 'Copy as PNG': 'Kopiëren als PNG', 'Copy as SVG': 'Kopiëren als SVG', 'Export…': 'Exporteren…',
   'Group / ungroup': 'Groeperen / opheffen', 'Align': 'Uitlijnen', 'Place without snapping': 'Plaatsen zonder snappen',
   'Measure distances': 'Afstanden meten', 'Ctrl + drag': 'Ctrl + slepen', 'Alt + hover': 'Alt + aanwijzen',
+  // step 3
+  'Vector': 'Vector', 'Auto layout': 'Auto layout', 'Add auto layout': 'Auto layout toevoegen', 'Remove auto layout': 'Auto layout verwijderen',
+  'Horizontal': 'Horizontaal', 'Vertical': 'Verticaal', 'Gap between layers': 'Ruimte tussen lagen', 'Padding left and right': 'Marge links en rechts',
+  'Padding top and bottom': 'Marge boven en onder', 'Alignment': 'Uitlijning', 'Space between': 'Ruimte ertussen verdelen',
+  'Fixed': 'Vast', 'Hug': 'Passend', 'Ignore auto layout': 'Auto layout negeren', 'Constraints': 'Vastzetten',
+  'Left': 'Links', 'Right': 'Rechts', 'Left and right': 'Links en rechts', 'Top': 'Boven', 'Bottom': 'Onder', 'Top and bottom': 'Boven en onder', 'Scale': 'Schalen',
+  'Fit': 'Passend', 'Stretch': 'Uitrekken', 'Tile': 'Tegels', 'Add image': 'Afbeelding toevoegen', 'Choose image': 'Afbeelding kiezen',
+  'Place image or SVG…': 'Afbeelding of SVG plaatsen…', 'Could not place {0}: {1}': 'Kon {0} niet plaatsen: {1}',
+  '{0} is not an image or SVG file': '{0} is geen afbeelding of SVG-bestand', 'Add / remove auto layout': 'Auto layout toevoegen / verwijderen',
+  'Recovered after an unexpected close': 'Hersteld na onverwacht afsluiten', 'Restore': 'Herstellen', 'Discard': 'Weggooien', 'Never saved': 'Nooit opgeslagen',
+  'Restored “{0}”. Save it to keep it.': '“{0}” hersteld. Sla het op om het te bewaren.',
   // files and messages
   'Save changes to “{0}”?': 'Wijzigingen in “{0}” opslaan?', 'Your changes are lost if you don’t save them.': 'Je wijzigingen gaan verloren als je ze niet opslaat.',
   'Don’t save': 'Niet opslaan', 'Cancel': 'Annuleren', 'Saved': 'Opgeslagen', 'Could not open {0}: {1}': 'Kon {0} niet openen: {1}',

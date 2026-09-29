@@ -49,13 +49,13 @@ export function attachLayers(root, editor) {
         const n = nodes[i];
         const li = document.createElement('li');
         li.className = 'layer' + (selected.has(n.id) ? ' selected' : '') + (!n.visible || hiddenParent ? ' is-hidden' : '') + (n.locked || lockedParent ? ' is-locked' : '');
-        li.dataset.id = n.id;
+        li.dataset.id = n.id; li.dataset.type = n.layout ? 'auto' : n.type;
         li.draggable = true;
         li.style.setProperty('--depth', depth);
         const hasKids = n.children?.length > 0;
         li.innerHTML = `
           <span class="twisty">${hasKids ? icon(collapsed.has(n.id) ? 'chevron-right' : 'chevron-down') : ''}</span>
-          <span class="type">${icon(n.type)}</span>
+          <span class="type">${icon(n.layout ? 'auto-layout' : n.fills?.some(f => f.type === 'image') ? 'image' : n.type)}</span>
           <span class="name"></span>
           <button class="icon ghost row-btn lock${n.locked ? ' on' : ''}" title="${t(n.locked ? 'Unlock' : 'Lock')}">${icon(n.locked ? 'lock' : 'unlock')}</button>
           <button class="icon ghost row-btn eye${!n.visible ? ' on' : ''}" title="${t(n.visible ? 'Hide' : 'Show')}">${icon(n.visible ? 'eye' : 'eye-off')}</button>`;

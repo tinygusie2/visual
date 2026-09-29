@@ -4,6 +4,7 @@
 import { absoluteRect } from '../core/document.js';
 import { fontString } from '../core/text.js';
 import { drawNode } from './draw.js';
+import { readyImage } from './images.js';
 
 export { measurer } from './draw.js';
 export const SELECT = '#4f8cff';
@@ -53,7 +54,10 @@ export class Renderer {
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     const scale = dpr * cam.zoom;
     ctx.setTransform(scale, 0, 0, scale, -cam.x * scale, -cam.y * scale);
-    const env = { scale, skipId: editor.editingTextId, backdrop: true, ensureFont: n => this.ensureFont(n) };
+    const env = {
+      scale, skipId: editor.editingTextId, backdrop: true, ensureFont: n => this.ensureFont(n),
+      image: id => readyImage(id, editor.assets.get(id), () => this.request())
+    };
     for (const node of page.children) drawNode(ctx, node, env);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.drawOverlay();
@@ -131,6 +135,14 @@ export class Renderer {
         ctx.stroke();
       }
       pill(ctx, String(round(m.value)), (a.x + b.x) / 2, (a.y + b.y) / 2, GUIDE);
+    }
+
+    // Where a layer dragged into an auto layout frame will go.
+    if (drag?.dropLine) {
+      const a = pt(drag.dropLine.x1, drag.dropLine.y1), b = pt(drag.dropLine.x2, drag.dropLine.y2);
+      ctx.strokeStyle = SELECT; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      ctx.lineCap = 'butt';
     }
 
     if (drag?.kind === 'marquee' && drag.rect) {

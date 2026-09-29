@@ -1,6 +1,8 @@
 // SVG export of a layer and everything in it. Text stays text (with the font named), shapes stay shapes, so the file
 // is editable elsewhere. measure(node) → (string → width) is injected for text line breaking, as in text.js.
-import { gradientLine, sortedStops } from './paint.js';
+// assets (Map or object: id → { mime, data, w, h }) are embedded as data URLs for image fills.
+import { gradientLine, imageRect, sortedStops } from './paint.js';
+import { parsePath, pathToString, scalePath } from './path.js';
 import { layoutText } from './text.js';
 
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -18,7 +20,8 @@ export function effectMargin(node) {
   return Math.ceil(m);
 }
 
-export function toSvg(node, measure) {
+export function toSvg(node, measure, assets = {}) {
+  const asset = id => assets instanceof Map ? assets.get(id) : assets[id];
   let uid = 0;
   const id = p => `${p}${++uid}`;
   const defs = [];
@@ -26,6 +29,11 @@ export function toSvg(node, measure) {
   const W = node.w + margin * 2, H = node.h + margin * 2;
 
   const shapeEl = (n, attrs) => {
+    if (n.type === 'vector') {
+      let d = '';
+      try { d = pathToString(scalePath(parsePath(n.path), n.w / (n.vw || 1), n.h / (n.vh || 1))); } catch {}
+      return `<path d="${d}"${n.fillRule === 'evenodd' ? ' fill-rule="evenodd"' : ''}${attrs}/>`;
+    }
     if (n.type === 'ellipse') return `<ellipse cx="${num(n.w / 2)}" cy="${num(n.h / 2)}" rx="${num(n.w / 2)}" ry="${num(n.h / 2)}"${attrs}/>`;
     const r = Math.min(n.radius || 0, n.w / 2, n.h / 2);
     return `<rect width="${num(n.w)}" height="${num(n.h)}"${r ? ` rx="${num(r)}"` : ''}${attrs}/>`;
@@ -36,6 +44,19 @@ export function toSvg(node, measure) {
       return p.opacity < 1 ? `fill="${p.color}" fill-opacity="${num(p.opacity)}"` : `fill="${p.color}"`;
     }
     const gid = id('g');
+    if (p.type === 'image') {
+      const a = asset(p.asset);
+      if (!a) return 'fill="#c8cad0"';
+      const href = `data:${a.mime};base64,${a.data}`;
+      if (p.fit === 'tile') {
+        const w = a.w * (p.scale || 1), h = a.h * (p.scale || 1);
+        defs.push(`<pattern id="${gid}" patternUnits="userSpaceOnUse" width="${num(w)}" height="${num(h)}"><image href="${href}" width="${num(w)}" height="${num(h)}" preserveAspectRatio="none"/></pattern>`);
+      } else {
+        const r = imageRect(p.fit, a.w, a.h, n.w, n.h);
+        defs.push(`<pattern id="${gid}" patternUnits="userSpaceOnUse" width="${num(n.w)}" height="${num(n.h)}"><image href="${href}" x="${num(r.x)}" y="${num(r.y)}" width="${num(r.w)}" height="${num(r.h)}" preserveAspectRatio="none"/></pattern>`);
+      }
+      return `fill="url(#${gid})"${p.opacity < 1 ? ` fill-opacity="${num(p.opacity)}"` : ''}`;
+    }
     const stops = sortedStops(p).map(s => `<stop offset="${num(s.pos)}" stop-color="${s.color}"${s.opacity < 1 ? ` stop-opacity="${num(s.opacity)}"` : ''}/>`).join('');
     if (p.type === 'linear') {
       const l = gradientLine(p.angle, n.w, n.h);

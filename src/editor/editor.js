@@ -6,10 +6,13 @@ import {
   isAncestor, reparent, topLevelOnly, walk
 } from '../core/document.js';
 import { align, distribute, tidy } from '../core/snap.js';
+import { applyLayout, inferLayout, inFlow, resizeContent } from '../core/layout.js';
+import { image } from '../core/paint.js';
 import { fitRect, pointInEllipse, pointInRect, zoomAt } from '../core/geometry.js';
 import { History } from '../core/history.js';
 import { fitTextSize } from '../core/text.js';
 import { measurer } from '../render/renderer.js';
+import { hitVector } from '../render/draw.js';
 
 export class Editor extends EventTarget {
   constructor() {
@@ -22,18 +25,22 @@ export class Editor extends EventTarget {
     this.hoverId = null; this.editingTextId = null; this.drag = null;
     this.clipboard = null;
     this.guides = []; this.measures = []; // snap lines and distances shown on the canvas
+    this.assets = new Map();     // image id → { mime, data, w, h, name }; outside the document so undo stays cheap
+    this.floating = new Set();   // layers being dragged out of their place in an auto layout frame
     this._index = null;
     this.viewport = { w: 1200, h: 800 };
   }
 
   // ---------- document ----------
   load(doc, path = null) {
+    this.assets = new Map(Object.entries(doc.assets || {}));
+    delete doc.assets;
     this.doc = doc; this.path = path; this.dirty = false;
     this.pageId = doc.pages[0].id; this.selection = []; this.cameras = {};
     this.history.clear(); this.editingTextId = null; this.hoverId = null; this.tool = 'move';
     this._index = null;
     this.refitText();
-    for (const page of doc.pages) fitGroups(page.children);
+    for (const page of doc.pages) this.relayout(page);
     this.zoomToFit(false);
     this.emit({ doc: true, selection: true, file: true, page: true });
   }
@@ -54,15 +61,25 @@ export class Editor extends EventTarget {
 
   // What changed: doc, selection, camera, tool, page, file (path/dirty). Panels redraw what they need.
   emit(what) {
-    if (what.doc) this._index = null;
+    if (what.doc) { this._index = null; this.relayout(); }
     this.dispatchEvent(Object.assign(new Event('change'), { what }));
+  }
+
+  // Groups take the size of their content, auto layout frames place theirs. Runs after every change, also mid-drag,
+  // so a frame that hugs grows while you type or drag inside it.
+  relayout(page = this.page) {
+    if (!page) return;
+    fitGroups(page.children);
+    applyLayout(page.children, { fitText: n => this.fit(n), skip: this.floating });
+    fitGroups(page.children);
+    this._index = null;
   }
 
   // ---------- history ----------
   state() { return { doc: this.doc, selection: this.selection, pageId: this.pageId }; }
   begin() { this.history.begin(this.state()); }
   commit() {
-    if (this.page) { fitGroups(this.page.children); this._index = null; }
+    this.relayout();
     if (this.history.commit(this.state())) { this.dirty = true; this.emit({ file: true }); }
   }
   // One undo step around fn.
@@ -133,7 +150,8 @@ export class Editor extends EventTarget {
         if (!n.visible) continue;
         const r = { x: ox + n.x, y: oy + n.y, w: n.w, h: n.h };
         // A group has no area of its own: only its content can be hit.
-        const inside = n.type === 'group' ? false : n.type === 'ellipse' ? pointInEllipse(p, r) : pointInRect(p, r);
+        const inside = n.type === 'group' ? false : n.type === 'ellipse' ? pointInEllipse(p, r)
+          : n.type === 'vector' ? hitVector(n, p.x - r.x, p.y - r.y, 4 / this.camera.zoom) : pointInRect(p, r);
         if (n.children && (!n.clip || inside)) {
           const sub = search(n.children, r.x, r.y);
           if (sub) return n.locked ? null : [n, ...sub];
@@ -216,7 +234,11 @@ export class Editor extends EventTarget {
       const values = typeof patch === 'function' ? patch(node) : patch;
       if (!values) continue;
       if (node.type === 'text' && 'text' in values && node.name === textName(node.text)) node.name = textName(values.text);
+      // What is inside a frame or group follows its new size (constraints, or scaling for a group).
+      const resized = node.children && (('w' in values && values.w !== node.w) || ('h' in values && values.h !== node.h));
+      const before = resized ? structuredClone(node) : null;
       Object.assign(node, values);
+      if (resized) resizeContent(node, before, n => this.fit(n));
       if (node.type === 'text') this.fit(node);
     }
     this.emit({ doc: true });
@@ -257,10 +279,35 @@ export class Editor extends EventTarget {
     if (transaction) this.transact(run); else run();
   }
 
+  // Arrow keys. In an auto layout frame the arrows along its direction move the layer earlier or later instead.
   nudge(dx, dy) {
     const ids = topLevelOnly(this.index, this.selection);
     if (!ids.length) return;
-    this.transact(() => { for (const id of ids) { const n = this.node(id); n.x += dx; n.y += dy; } });
+    this.transact(() => {
+      for (const id of ids) {
+        const { node, parent } = this.index.get(id);
+        if (!inFlow(node, parent)) { node.x += dx; node.y += dy; continue; }
+        const step = Math.sign(parent.layout.mode === 'row' ? dx : dy);
+        const list = parent.children, from = list.indexOf(node);
+        const to = Math.max(0, Math.min(list.length - 1, from + step));
+        list.splice(from, 1); list.splice(to, 0, node);
+      }
+    });
+  }
+
+  // Puts layers into `target` at `index` of its children without them (auto layout drops); keeps them where they
+  // are on screen until the layout places them.
+  insertInto(ids, target, index) {
+    const nodes = ids.map(id => this.node(id)).filter(Boolean);
+    for (const n of nodes) {
+      reparent(this.page, this.index, n.id, target);
+      this._index = null;
+    }
+    const rest = target.children.filter(c => !nodes.includes(c));
+    rest.splice(Math.min(index, rest.length), 0, ...nodes);
+    target.children = rest;
+    for (const n of nodes) n.absolute = false;
+    this._index = null;
   }
 
   // Moves layers in the tree: into `parent` (null = page) at position `at` of its children (the end is on top).
@@ -319,9 +366,13 @@ export class Editor extends EventTarget {
 
   // Wraps the selection in a new group (Ctrl+G) or frame (Ctrl+Alt+G) in the parent of the topmost layer.
   wrap(type) {
+    if (!this.selection.length) return;
+    this.transact(() => this.wrapIn(type));
+  }
+  wrapIn(type) {
     const ids = this.zOrdered(topLevelOnly(this.index, this.selection));
     if (!ids.length) return;
-    this.transact(() => {
+    {
       const index = this.index;
       const top = index.get(ids.at(-1));
       const parent = top.parent;
@@ -334,7 +385,7 @@ export class Editor extends EventTarget {
       this._index = null;
       for (const id of ids) { reparent(this.page, this.index, id, wrapper); this._index = null; }
       this.selection = [wrapper.id];
-    });
+    }
   }
 
   // Ctrl+Shift+G: takes the content out of selected groups (and frames), keeping it where it is.
@@ -394,12 +445,121 @@ export class Editor extends EventTarget {
     this.transact(() => this.placeAbsolute(ids, tidy(ids.map(id => absoluteRect(index, id)))));
   }
 
-  // ---------- clipboard (inside Visual for now) ----------
+  // ---------- auto layout ----------
+  // Shift+A: a selected frame gets auto layout (read from how its content is placed now); other layers are wrapped in
+  // a new frame with auto layout first.
+  addAutoLayout() {
+    const sel = this.selectedNodes;
+    if (!sel.length) return;
+    const single = sel.length === 1 && sel[0].type === 'frame' ? sel[0] : null;
+    if (single?.layout) return;
+    this.transact(() => {
+      let frame = single;
+      if (!frame) {
+        this.wrapIn('frame');
+        frame = this.selectedNodes[0];
+      }
+      frame.layout = inferLayout(frame);
+      if (frame.children.length) { frame.widthMode = 'hug'; frame.heightMode = 'hug'; }
+      this.selection = [frame.id];
+    });
+  }
+  removeAutoLayout() {
+    const frames = this.selectedNodes.filter(n => n.layout);
+    if (!frames.length) return;
+    this.transact(() => {
+      for (const f of frames) {
+        f.layout = null;
+        if (f.widthMode === 'hug') f.widthMode = 'fixed';
+        if (f.heightMode === 'hug') f.heightMode = 'fixed';
+        for (const c of f.children) { if (c.widthMode === 'fill') c.widthMode = 'fixed'; if (c.heightMode === 'fill') c.heightMode = 'fixed'; }
+      }
+    });
+  }
+  // Changes part of the layout of the selected auto layout frames (one undo step).
+  setLayout(patch) {
+    this.update(this.selectedNodes.filter(n => n.layout).map(n => n.id), n => ({ layout: { ...n.layout, ...(typeof patch === 'function' ? patch(n.layout) : patch) } }));
+  }
+
+  // ---------- images and imported layers ----------
+  // assets: [{ id, mime, data, w, h, name }]. Each becomes a rectangle with the image as its fill, at its own size
+  // (made smaller when it is huge), side by side around `at` (world point; default the middle of the view).
+  placeImages(assets, at = this.viewCenter()) {
+    if (!assets.length) return [];
+    const ids = [];
+    this.transact(() => {
+      const parent = this.frameAt(at);
+      let x = at.x - assets.reduce((s, a) => s + fitSize(a).w + 20, -20) / 2;
+      for (const a of assets) {
+        this.assets.set(a.id, { mime: a.mime, data: a.data, w: a.w, h: a.h, name: a.name });
+        const { w, h } = fitSize(a);
+        const node = this.addNode('rect', { name: a.name || 'Image', x: Math.round(x), y: Math.round(at.y - h / 2), w, h, fills: [image(a.id)] }, parent);
+        ids.push(node.id);
+        x += w + 20;
+      }
+      this.selection = ids;
+    });
+    return ids;
+  }
+
+  // Adds a finished layer tree (SVG import) with its middle (or top-left) at world point `at`.
+  importNodes(nodes, at = this.viewCenter(), { center = true } = {}) {
+    if (!nodes.length) return [];
+    const ids = [];
+    this.transact(() => {
+      const box = boundsOf(nodes);
+      const parent = this.frameAt(at);
+      const origin = parent ? absolute(this.index, parent.id) : { x: 0, y: 0 };
+      const ox = Math.round(at.x - (center ? box.w / 2 : 0) - box.x - origin.x), oy = Math.round(at.y - (center ? box.h / 2 : 0) - box.y - origin.y);
+      for (const n of nodes) {
+        const copy = cloneWithNewIds(n);
+        copy.x += ox; copy.y += oy;
+        childrenOf(this.page, parent).push(copy);
+        ids.push(copy.id);
+      }
+      this._index = null;
+      this.refitText();
+      this.selection = ids;
+    });
+    return ids;
+  }
+
+  // Sets the image of the selected layers' image fill (or adds one on top).
+  setImageFill(asset) {
+    this.assets.set(asset.id, { mime: asset.mime, data: asset.data, w: asset.w, h: asset.h, name: asset.name });
+    this.update(this.selection, n => {
+      const fills = structuredClone(n.fills || []);
+      const at = fills.findLastIndex(p => p.type === 'image');
+      if (at >= 0) fills[at].asset = asset.id; else fills.push(image(asset.id));
+      return { fills };
+    });
+  }
+
+  viewCenter() {
+    const c = this.camera;
+    return { x: c.x + this.viewport.w / 2 / c.zoom, y: c.y + this.viewport.h / 2 / c.zoom };
+  }
+
+  // ---------- clipboard ----------
   copy() {
     const index = this.index;
     const ids = topLevelOnly(index, this.selection);
     if (!ids.length) return false;
     this.clipboard = ids.map(id => ({ node: structuredClone(index.get(id).node), abs: absolute(index, id) }));
+    return true;
+  }
+  // The copied layers with their images, for the system clipboard (paste into another design or window).
+  clipboardPayload() {
+    if (!this.clipboard?.length) return null;
+    const assets = {};
+    walk(this.clipboard.map(c => c.node), n => { for (const p of n.fills || []) if (p.type === 'image' && this.assets.has(p.asset)) assets[p.asset] = this.assets.get(p.asset); });
+    return { format: 'visual-layers', version: 1, items: this.clipboard, assets };
+  }
+  // Layers copied in another window become this window's clipboard; then they paste as usual.
+  takeClipboard(payload) {
+    if (payload?.format !== 'visual-layers' || !Array.isArray(payload.items)) return false;
+    for (const [id, a] of Object.entries(payload.assets || {})) if (!this.assets.has(id)) this.assets.set(id, a);
+    this.clipboard = payload.items;
     return true;
   }
   cut() { if (this.copy()) this.deleteSelection(); }
@@ -508,3 +668,9 @@ export class Editor extends EventTarget {
 
 export const textName = text => (String(text).split('\n')[0].trim().slice(0, 40)) || 'Text';
 const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+
+// Placed images at their own size, but no bigger than 1200 on their longest side.
+function fitSize(a) {
+  const k = Math.min(1, 1200 / Math.max(a.w, a.h, 1));
+  return { w: Math.max(1, Math.round(a.w * k)), h: Math.max(1, Math.round(a.h * k)) };
+}

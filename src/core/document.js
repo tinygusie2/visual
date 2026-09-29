@@ -1,13 +1,14 @@
 // The .visual document: pages that each hold a tree of nodes. Every node has an id that never changes, not when it
 // is moved, renamed, restyled or saved, so Motion Studio can later tie animations to it.
 // Positions are relative to the parent frame (or to the page for top-level nodes); rotation is stored but not yet
-// editable on the canvas.
+// editable on the canvas. Images live once per document in `assets` (content-addressed), layers point at them from
+// an image paint; in the editor they are kept outside the document so undo snapshots stay small.
 //
 // This module is plain data + functions (no DOM), so it runs in the editor and in node tests alike.
 import { solid } from './paint.js';
 
 export const FORMAT = 'visual';
-export const FORMAT_VERSION = 2;
+export const FORMAT_VERSION = 3;
 
 export function newId(prefix = 'node') {
   const bytes = crypto.getRandomValues(new Uint8Array(6));
@@ -16,13 +17,19 @@ export function newId(prefix = 'node') {
 
 // fills/strokes: see paint.js. effects: { type: 'drop-shadow' | 'inner-shadow', x, y, blur, spread, color, opacity,
 // visible } or { type: 'layer-blur' | 'background-blur', radius, visible }. exports: { format: png|jpg|webp|svg, scale }.
-const base = () => ({ rotation: 0, opacity: 1, visible: true, locked: false, fills: [], strokes: [], effects: [], exports: [] });
+// constraints, widthMode, heightMode, absolute and a frame's layout: see layout.js.
+const base = () => ({
+  rotation: 0, opacity: 1, visible: true, locked: false, fills: [], strokes: [], effects: [], exports: [],
+  constraints: { h: 'left', v: 'top' }, widthMode: 'fixed', heightMode: 'fixed', absolute: false
+});
 
 export const defaults = {
-  frame: { ...base(), fills: [solid('#ffffff')], radius: 0, clip: true, children: [] },
+  frame: { ...base(), fills: [solid('#ffffff')], radius: 0, clip: true, layout: null, children: [] },
   group: { ...base(), children: [] },
   rect: { ...base(), fills: [solid('#d9d9d9')], radius: 0 },
   ellipse: { ...base(), fills: [solid('#d9d9d9')] },
+  // A drawn or imported shape: SVG path data in a vw × vh box, stretched to the layer's w × h.
+  vector: { ...base(), fills: [solid('#d9d9d9')], path: '', vw: 100, vh: 100, fillRule: 'nonzero' },
   text: {
     ...base(), fills: [solid('#000000')], text: '', fontFamily: 'Google Sans Flex', fontSize: 16, fontWeight: 400,
     lineHeight: 1.2, letterSpacing: 0, align: 'left', sizing: 'auto-width'
@@ -33,7 +40,7 @@ export const defaults = {
 // always exactly as big as its content.
 export const isContainer = n => n.type === 'frame' || n.type === 'group';
 
-const typeNames = { frame: 'Frame', group: 'Group', rect: 'Rectangle', ellipse: 'Ellipse', text: 'Text' };
+const typeNames = { frame: 'Frame', group: 'Group', rect: 'Rectangle', ellipse: 'Ellipse', text: 'Text', vector: 'Vector' };
 
 export function createNode(type, props = {}) {
   if (!defaults[type]) throw new Error(`Unknown node type: ${type}`);
@@ -63,6 +70,7 @@ export function parseDocument(text) {
   if (doc?.format !== FORMAT || !Array.isArray(doc.pages)) throw new Error('This file is not a Visual document.');
   if (doc.version > FORMAT_VERSION) throw new Error(`This document was made with a newer Visual (format ${doc.version}). Update Visual to open it.`);
   if (!doc.pages.length) doc.pages.push(createPage());
+  if (!doc.assets || typeof doc.assets !== 'object') doc.assets = {};
   const seen = new Set();
   const fix = node => {
     const d = defaults[node.type];
@@ -78,8 +86,18 @@ export function parseDocument(text) {
   return doc;
 }
 
-export function serializeDocument(doc) {
-  return JSON.stringify({ ...doc, modified: new Date().toISOString() }, null, 1);
+// assets: id → { mime, data (base64), w, h, name }; only the ones the pages still use are written.
+export function serializeDocument(doc, assets = doc.assets || {}) {
+  const used = {};
+  const get = id => assets instanceof Map ? assets.get(id) : assets[id];
+  for (const id of usedAssets(doc)) if (get(id)) used[id] = get(id);
+  return JSON.stringify({ ...doc, modified: new Date().toISOString(), assets: used }, null, 1);
+}
+
+export function usedAssets(doc) {
+  const ids = new Set();
+  for (const page of doc.pages) walk(page.children, n => { for (const p of n.fills || []) if (p.type === 'image' && p.asset) ids.add(p.asset); });
+  return ids;
 }
 
 // ---------- tree ----------

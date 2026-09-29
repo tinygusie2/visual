@@ -3,7 +3,7 @@ import { icon, wink } from './icons.js';
 import { t } from './i18n.js';
 import { templates } from './presets.js';
 
-export function attachStart(root, { onTemplate, onOpen, onOpenPath }) {
+export function attachStart(root, { onTemplate, onOpen, onOpenPath, onRecover }) {
   root.innerHTML = `
     <div class="start-inner">
       <div class="home">
@@ -11,6 +11,10 @@ export function attachStart(root, { onTemplate, onOpen, onOpenPath }) {
         <div class="start-actions">
           <button class="primary big" data-new>${icon('plus')}<span>${t('New design')}</span></button>
           <button class="big" data-open><span>${t('Open file')}</span></button>
+        </div>
+        <div class="recovered" hidden>
+          <h3>${t('Recovered after an unexpected close')}</h3>
+          <ul class="recover-list"></ul>
         </div>
         <h3>${t('Recent')}</h3>
         <ul class="recents"></ul>
@@ -55,6 +59,7 @@ export function attachStart(root, { onTemplate, onOpen, onOpenPath }) {
     async show() {
       picker.hidden = true; home.hidden = false;
       root.hidden = false;
+      this.showRecovered();
       const list = root.querySelector('.recents');
       const recents = await window.host.recents();
       if (!recents.length) { list.innerHTML = `<li class="muted empty">${t('No recent designs yet')}</li>`; return; }
@@ -68,6 +73,23 @@ export function attachStart(root, { onTemplate, onOpen, onOpenPath }) {
         li.querySelector('.rdate').textContent = new Date(r.opened).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
         li.querySelector('button').addEventListener('click', async e => { e.stopPropagation(); await window.host.removeRecent(r.path); this.show(); });
         li.addEventListener('click', () => { if (!r.missing) onOpenPath(r.path); });
+        return li;
+      }));
+    },
+    // Designs that were open with unsaved changes when Visual last closed without asking.
+    async showRecovered() {
+      const box = root.querySelector('.recovered'), list = root.querySelector('.recover-list');
+      const items = await window.host.recoveryList();
+      box.hidden = !items.length;
+      list.replaceChildren(...items.map(m => {
+        const li = document.createElement('li');
+        li.className = 'recover';
+        li.innerHTML = `<span class="rname"></span><span class="rpath muted"></span>
+          <button class="primary" data-restore>${t('Restore')}</button><button class="ghost" data-discard>${t('Discard')}</button>`;
+        li.querySelector('.rname').textContent = m.name;
+        li.querySelector('.rpath').textContent = `${m.path || t('Never saved')} · ${new Date(m.time).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`;
+        li.querySelector('[data-restore]').addEventListener('click', () => onRecover?.(m));
+        li.querySelector('[data-discard]').addEventListener('click', async () => { await window.host.recoveryRemove(m.id); this.showRecovered(); });
         return li;
       }));
     },

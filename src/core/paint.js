@@ -1,12 +1,14 @@
 // Colours and paints. A layer has a list of fills (drawn bottom to top) and a list of strokes:
 //   solid     { type: 'solid', color: '#rrggbb', opacity, visible }
 //   gradient  { type: 'linear' | 'radial', stops: [{ pos: 0..1, color, opacity }], angle (linear, CSS degrees), opacity, visible }
+//   image     { type: 'image', asset: id in the document's assets, fit: 'fill' | 'fit' | 'stretch' | 'tile', scale (tile), opacity, visible }
 // Gradients follow CSS: linear-gradient(<angle>deg) with 90° = left → right, radial = radial-gradient(closest-side),
 // so the same paint looks the same on the canvas, in SVG and in Motion Studio's HTML.
 
 export const solid = (color = '#d9d9d9', opacity = 1) => ({ type: 'solid', color, opacity, visible: true });
 export const gradient = (type = 'linear', stops = [{ pos: 0, color: '#ffffff', opacity: 1 }, { pos: 1, color: '#000000', opacity: 1 }], angle = 180) =>
   ({ type, stops, angle, opacity: 1, visible: true });
+export const image = (asset, fit = 'fill') => ({ type: 'image', asset, fit, scale: 1, opacity: 1, visible: true });
 export const stroke = (color = '#000000', width = 1) => ({ color, opacity: 1, width, align: 'inside', visible: true });
 
 // ---------- colour conversion ----------
@@ -79,13 +81,21 @@ export function colorAt(p, t) {
 // CSS for a paint (text editor overlay now, Motion Studio later).
 export function paintCss(p) {
   if (p.type === 'solid') return rgba(p.color, p.opacity);
+  if (p.type === 'image') return '#8b8e97';
   const stops = sortedStops(p).map(s => `${rgba(s.color, s.opacity * p.opacity)} ${+(s.pos * 100).toFixed(2)}%`).join(', ');
   return p.type === 'linear' ? `linear-gradient(${p.angle}deg, ${stops})` : `radial-gradient(closest-side, ${stops})`;
 }
 
+// Where an image of iw × ih goes in a w × h box: CSS object-fit cover (fill), contain (fit) or stretch.
+export function imageRect(fit, iw, ih, w, h) {
+  if (fit === 'stretch' || !iw || !ih) return { x: 0, y: 0, w, h };
+  const k = fit === 'fit' ? Math.min(w / iw, h / ih) : Math.max(w / iw, h / ih);
+  return { x: (w - iw * k) / 2, y: (h - ih * k) / 2, w: iw * k, h: ih * k };
+}
+
 // The first visible solid colour of a layer (for things that need one colour, like the text cursor).
 export function mainColor(node) {
-  const f = [...(node.fills || [])].reverse().find(p => p.visible);
+  const f = [...(node.fills || [])].reverse().find(p => p.visible && p.type !== 'image');
   if (!f) return null;
   return f.type === 'solid' ? f.color : sortedStops(f)[0].color;
 }

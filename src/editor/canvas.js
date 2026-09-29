@@ -2,6 +2,7 @@
 import { absolute, absoluteRect, boundsOf, childrenOf, reparent, topLevelOnly } from '../core/document.js';
 import { mapRect, rectFromPoints, resizeRect, toWorld } from '../core/geometry.js';
 import { gaps, guidesForBox, measureBetween, snapMove, snapValue } from '../core/snap.js';
+import { dropIndex, inFlow, resizeContent } from '../core/layout.js';
 import { HANDLE_SIZE, handlePoints } from '../render/renderer.js';
 
 const DRAG_START = 3; // px on screen before a press becomes a drag
@@ -19,17 +20,7 @@ function snapContext(editor, parent, exclude) {
   return { siblings, parentRect: around[0] || null, targets: [...siblings, ...around] };
 }
 
-// Scales everything inside a group along with it (a frame's content keeps its size; constraints come later).
-function scaleChildren(target, source, sx, sy) {
-  target.children?.forEach((c, i) => {
-    const o = source.children[i];
-    Object.assign(c, { x: +(o.x * sx).toFixed(2), y: +(o.y * sy).toFixed(2), w: Math.max(1, +(o.w * sx).toFixed(2)), h: Math.max(1, +(o.h * sy).toFixed(2)) });
-    if (c.type === 'text') c.sizing = 'fixed';
-    if (c.children) scaleChildren(c, o, sx, sy);
-  });
-}
-
-export function attachCanvas(canvas, editor, renderer, { onContextMenu } = {}) {
+export function attachCanvas(canvas, editor, renderer, { onContextMenu, onDropFiles } = {}) {
   const local = e => { const b = canvas.getBoundingClientRect(); return { x: e.clientX - b.left, y: e.clientY - b.top }; };
   const world = p => toWorld(editor.camera, p);
   let spaceDown = false;
@@ -85,7 +76,7 @@ export function attachCanvas(canvas, editor, renderer, { onContextMenu } = {}) {
         kind: 'resize', handle, startScreen: screen, start: at, box: editor.selectionBounds(), started: false,
         items: ids.map(id => ({
           id, abs: absoluteRect(index, id), origin: index.get(id).parent ? absolute(index, index.get(id).parent.id) : { x: 0, y: 0 },
-          start: index.get(id).node.type === 'group' ? structuredClone(index.get(id).node) : null
+          start: index.get(id).node.children ? structuredClone(index.get(id).node) : null
         })),
         snap: snapContext(editor, index.get(ids[0]).parent, ids)
       };
@@ -141,6 +132,8 @@ export function attachCanvas(canvas, editor, renderer, { onContextMenu } = {}) {
         drag.starts = drag.ids.map(id => { const n = editor.node(id); return { x: n.x, y: n.y }; });
         drag.box = boundsOf(drag.ids.map(id => absoluteRect(editor.index, id)));
         drag.snap = snapContext(editor, editor.index.get(drag.ids[0]).parent, drag.ids);
+        // Layers in an auto layout frame leave their place while dragged; the others close up behind them.
+        for (const id of drag.ids) { const e = editor.index.get(id); if (inFlow(e.node, e.parent)) editor.floating.add(id); }
         drag.moved = true; editor.hoverId = null;
       }
       if (e.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; }
@@ -156,6 +149,14 @@ export function attachCanvas(canvas, editor, renderer, { onContextMenu } = {}) {
       editor.measures = gaps(moved, drag.snap.siblings, drag.snap.parentRect);
       drag.ids.forEach((id, i) => { const n = editor.node(id); n.x = Math.round(drag.starts[i].x + dx); n.y = Math.round(drag.starts[i].y + dy); });
       drag.last = at;
+      // Over an auto layout frame: a line shows where the layers will go.
+      const target = editor.frameAt(at, drag.ids);
+      drag.dropLine = null; drag.drop = null;
+      if (target?.layout) {
+        const d = dropIndex(target, absolute(editor.index, target.id), at, drag.ids);
+        drag.drop = { target, index: d.index }; drag.dropLine = d.line;
+        editor.guides = []; editor.measures = [];
+      }
       editor.emit({ doc: true });
       return;
     }
@@ -177,8 +178,11 @@ export function attachCanvas(canvas, editor, renderer, { onContextMenu } = {}) {
         const r = drag.items.length === 1 ? next : mapRect(item.abs, drag.box, next);
         const n = editor.node(item.id);
         Object.assign(n, { x: Math.round(r.x - item.origin.x), y: Math.round(r.y - item.origin.y), w: Math.max(1, Math.round(r.w)), h: Math.max(1, Math.round(r.h)) });
+        // Dragging an edge fixes that size (a frame that hugged or a layer that filled now keeps what you drag).
+        if (/[ew]/.test(drag.handle)) n.widthMode = 'fixed';
+        if (/[ns]/.test(drag.handle)) n.heightMode = 'fixed';
         if (n.type === 'text') { n.sizing = sideOnly && drag.items.length === 1 ? 'auto-height' : 'fixed'; editor.fit(n); }
-        if (item.start) scaleChildren(n, item.start, n.w / item.start.w, n.h / item.start.h);
+        if (item.start) resizeContent(n, item.start, x => editor.fit(x));
       }
       editor.emit({ doc: true });
       return;
@@ -229,10 +233,12 @@ export function attachCanvas(canvas, editor, renderer, { onContextMenu } = {}) {
 
     if (drag.kind === 'move') {
       if (drag.moved) {
+        editor.floating.clear();
         // Dropped over another frame (or out of its own): the layers move into it, staying where they are.
         const target = editor.frameAt(drag.last || at, drag.ids);
+        if (drag.drop && drag.drop.target === target) editor.insertInto(drag.ids, target, drag.drop.index);
         // Layers inside a group stay in it (take them out in the layers panel or with Ctrl+Shift+G).
-        for (const id of drag.ids) {
+        else for (const id of drag.ids) {
           const parent = editor.index.get(id)?.parent || null;
           if (parent?.type === 'group') continue;
           if ((parent?.id ?? null) !== (target?.id ?? null)) { reparent(editor.page, editor.index, id, target); editor.emit({ doc: true }); }
@@ -283,6 +289,14 @@ export function attachCanvas(canvas, editor, renderer, { onContextMenu } = {}) {
     const id = editor.frameLabelAt(screen) || editor.pick(world(screen), { deep: e.ctrlKey });
     if (id && !editor.selection.includes(id)) editor.select([id]);
     onContextMenu({ x: e.clientX, y: e.clientY });
+  });
+
+  // Images and SVG files dropped from Explorer land where they are dropped.
+  canvas.addEventListener('dragover', e => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
+  canvas.addEventListener('drop', e => {
+    if (!e.dataTransfer.files.length || !onDropFiles) return;
+    e.preventDefault();
+    onDropFiles([...e.dataTransfer.files], world(local(e)));
   });
 
   canvas.addEventListener('wheel', e => {

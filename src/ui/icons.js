@@ -32,7 +32,12 @@ const paths = {
   'dist-h': '<path d="M2.5 2v12M13.5 2v12M6.5 5v6h3V5z"/>',
   'dist-v': '<path d="M2 2.5h12M2 13.5h12M5 6.5h6v3H5z"/>',
   tidy: '<rect x="2" y="5" width="3" height="6"/><rect x="6.5" y="5" width="3" height="6"/><rect x="11" y="5" width="3" height="6"/>',
-  x: '<path d="M4 4l8 8M12 4l-8 8"/>'
+  x: '<path d="M4 4l8 8M12 4l-8 8"/>',
+  image: '<rect x="2" y="3" width="12" height="10" rx="1.5"/><circle cx="6" cy="6.5" r="1.2"/><path d="M2.5 12l3.5-3.5 2.5 2.5 2-2 3 3"/>',
+  vector: '<path d="M3 12.5C5 5 11 11 13 3.5"/><rect x="1.8" y="11.3" width="2.4" height="2.4" rx=".4"/><rect x="11.8" y="2.3" width="2.4" height="2.4" rx=".4"/>',
+  'dir-row': '<path d="M2 8h11M10 5l3 3-3 3"/>',
+  'dir-column': '<path d="M8 2v11M5 10l3 3 3-3"/>',
+  'auto-layout': '<rect x="2.5" y="2.5" width="11" height="4" rx="1"/><rect x="2.5" y="9.5" width="11" height="4" rx="1"/>'
 };
 
 export function icon(name) {
