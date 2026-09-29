@@ -1,0 +1,25 @@
+{
+  "name": "visual",
+  "productName": "Visual",
+  "version": "0.1.0",
+  "description": "Local-first desktop design editor for UI mockups, posters and social visuals, made to hand designs to Motion Studio layer by layer.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "node scripts/check.mjs",
+    "pack": "node scripts/pack.mjs",
+    "icon": "electron scripts/make-icon.cjs",
+    "smoke": "electron . --smoke-test"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^44.4.5"
+  }
+}

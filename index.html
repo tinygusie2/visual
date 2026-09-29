@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'">
+  <title>Visual</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header id="topbar">
+    <button id="logo" class="ghost icon" aria-label="Menu"></button>
+    <span class="product">Visual</span>
+    <span class="slash">/</span>
+    <span id="doc-name"></span>
+    <span id="dirty" hidden>●</span>
+    <span class="spacer"></span>
+    <button id="zoom" class="ghost">100%</button>
+  </header>
+
+  <aside id="left"></aside>
+  <main id="stage">
+    <canvas id="canvas"></canvas>
+    <nav id="toolbar"></nav>
+  </main>
+  <aside id="right"></aside>
+
+  <div id="start" hidden></div>
+  <dialog id="shortcuts"></dialog>
+  <div id="toasts"></div>
+  <datalist id="font-list"></datalist>
+
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>
