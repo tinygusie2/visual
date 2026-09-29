@@ -97,6 +97,6 @@ test('image paints: fit rectangles, and only used images are saved', () => {
   const text = serializeDocument(doc, new Map([['img_a', { mime: 'image/png', data: 'AAA', w: 1, h: 1 }], ['img_b', { mime: 'image/png', data: 'BBB', w: 1, h: 1 }]]));
   const back = JSON.parse(text);
   assert.deepEqual(Object.keys(back.assets), ['img_a']);
-  assert.equal(back.version, 3);
+  assert.equal(back.version, 4);
   assert.deepEqual(back.pages[0].children[0].constraints, { h: 'left', v: 'top' });
 });

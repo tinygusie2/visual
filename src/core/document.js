@@ -2,13 +2,14 @@
 // is moved, renamed, restyled or saved, so Motion Studio can later tie animations to it.
 // Positions are relative to the parent frame (or to the page for top-level nodes); rotation is stored but not yet
 // editable on the canvas. Images live once per document in `assets` (content-addressed), layers point at them from
-// an image paint; in the editor they are kept outside the document so undo snapshots stay small.
+// an image paint; in the editor they are kept outside the document so undo snapshots stay small. Components,
+// instances and colour variables (doc.variables): see components.js.
 //
 // This module is plain data + functions (no DOM), so it runs in the editor and in node tests alike.
 import { solid } from './paint.js';
 
 export const FORMAT = 'visual';
-export const FORMAT_VERSION = 3;
+export const FORMAT_VERSION = 4;
 
 export function newId(prefix = 'node') {
   const bytes = crypto.getRandomValues(new Uint8Array(6));
@@ -60,7 +61,7 @@ export function createPage(name = 'Page 1') {
 
 export function createDocument(name = 'Untitled') {
   const now = new Date().toISOString();
-  return { format: FORMAT, version: FORMAT_VERSION, id: newId('doc'), name, created: now, modified: now, pages: [createPage()] };
+  return { format: FORMAT, version: FORMAT_VERSION, id: newId('doc'), name, created: now, modified: now, pages: [createPage()], variables: [] };
 }
 
 // Checks and completes a document read from disk; throws on something that is not a .visual file.
@@ -71,6 +72,7 @@ export function parseDocument(text) {
   if (doc.version > FORMAT_VERSION) throw new Error(`This document was made with a newer Visual (format ${doc.version}). Update Visual to open it.`);
   if (!doc.pages.length) doc.pages.push(createPage());
   if (!doc.assets || typeof doc.assets !== 'object') doc.assets = {};
+  if (!Array.isArray(doc.variables)) doc.variables = [];
   const seen = new Set();
   const fix = node => {
     const d = defaults[node.type];

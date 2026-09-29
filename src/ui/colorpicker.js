@@ -1,6 +1,8 @@
 // The colour picker: a popover next to the properties panel. It edits a paint (solid, linear or radial gradient):
-// colour field + hue + opacity, HEX / RGB / HSL, eyedropper, colours used in the document and recent colours.
-// For gradients a bar with the stops sits on top: click the bar to add a stop, drag to move, Delete to remove.
+// colour field + hue + opacity, HEX / RGB / HSL, eyedropper, the document's colour variables, colours used in the
+// document and recent colours. A solid colour can be bound to a variable (click it; changing the colour by hand
+// unbinds it) or saved as a new one (+). For gradients a bar with the stops sits on top: click the bar to add a stop,
+// drag to move, Delete to remove.
 import {
   colorAt, gradient, hexToRgb, hslToRgb, hsvToRgb, normalizeHex, paintCss, rgbToHex, rgbToHsl, rgbToHsv, rgba, solid, sortedStops
 } from '../core/paint.js';
@@ -18,7 +20,8 @@ function rememberColor(hex) {
 export function closeColorPicker() { current?.close(); }
 export const colorPickerOpen = () => !!current;
 
-// options: { paint, gradients (allow gradient types), opacity (show opacity), documentColors: [...hex], onChange(paint), onClose() }
+// options: { paint, gradients (allow gradient types), opacity (show opacity), documentColors: [...hex],
+//   variables: [{ id, name, color }] (omit to leave them out), onCreateVariable(hex) → variable, onChange(paint), onClose() }
 export function openColorPicker(anchor, options) {
   closeColorPicker();
   let paint = structuredClone(options.paint);
@@ -48,6 +51,8 @@ export function openColorPicker(anchor, options) {
       <div class="vals"></div>
       <label class="op" ${withOpacity ? '' : 'hidden'}><input type="text" inputmode="decimal"><span>%</span></label>
     </div>
+    <div class="swatches var-colors" ${options.variables ? '' : 'hidden'}><h4><span>${t('Colour variables')}</span>
+      <button class="icon ghost add-var" title="${t('Save as colour variable')}">${icon('plus')}</button></h4><div class="row"></div></div>
     <div class="swatches doc-colors"><h4>${t('Document colours')}</h4><div class="row"></div></div>
     <div class="swatches recent-colors"><h4>${t('Recent colours')}</h4><div class="row"></div></div>`;
   document.body.append(el);
@@ -60,6 +65,7 @@ export function openColorPicker(anchor, options) {
   const emit = () => { options.onChange(structuredClone(paint)); };
   function setColor(hex, { keepHsv = false } = {}) {
     target().color = hex;
+    delete target().variable;
     if (!keepHsv) hsv = rgbToHsv(hexToRgb(hex));
     emit(); render();
   }
@@ -92,6 +98,8 @@ export function openColorPicker(anchor, options) {
     $('.hue .knob').style.left = `${hsv.h / 360 * 100}%`;
     $('.alpha-fill').style.background = `linear-gradient(90deg, transparent, ${tg.color})`;
     $('.alpha .knob').style.left = `${tg.opacity * 100}%`;
+    el.querySelectorAll('.var-colors .sw').forEach(b => b.classList.toggle('on', b.dataset.id === tg.variable));
+    $('.add-var').hidden = paint.type !== 'solid' || !options.onCreateVariable;
     renderFields();
   }
 
@@ -204,6 +212,30 @@ export function openColorPicker(anchor, options) {
     }));
   };
   swatchRow('.doc-colors', (options.documentColors || []).slice(0, 18));
+  // Variables: a solid colour is bound to the one clicked, a gradient stop just takes its colour.
+  const varRow = () => {
+    const vars = options.variables || [];
+    $('.var-colors .row').replaceChildren(...vars.map(v => {
+      const b = document.createElement('button');
+      b.className = 'sw'; b.style.background = v.color; b.title = `${v.name}  ${v.color.toUpperCase()}`; b.dataset.id = v.id;
+      b.addEventListener('click', () => {
+        if (paint.type !== 'solid') return setColor(v.color);
+        paint.color = v.color; paint.variable = v.id;
+        hsv = rgbToHsv(hexToRgb(v.color));
+        emit(); render();
+      });
+      return b;
+    }));
+  };
+  varRow();
+  $('.add-var').addEventListener('click', () => {
+    const v = options.onCreateVariable?.(paint.color);
+    if (!v) return;
+    options.variables = [...(options.variables || []).filter(x => x.id !== v.id), v];
+    varRow();
+    paint.variable = v.id;
+    emit(); render();
+  });
   swatchRow('.recent-colors', recentColors());
 
   el.addEventListener('keydown', e => {

@@ -6,8 +6,12 @@ import {
   isAncestor, reparent, topLevelOnly, walk
 } from '../core/document.js';
 import { align, distribute, tidy } from '../core/snap.js';
+import {
+  applyVariables, colorVariable, componentMap, dependsOn, detachInstance, findComponent, instancify, makeInstance, overrideValues, ownerInstance,
+  syncInstances, unbindVariables
+} from '../core/components.js';
 import { applyLayout, inferLayout, inFlow, resizeContent } from '../core/layout.js';
-import { image } from '../core/paint.js';
+import { image, solid } from '../core/paint.js';
 import { fitRect, pointInEllipse, pointInRect, zoomAt } from '../core/geometry.js';
 import { History } from '../core/history.js';
 import { fitTextSize } from '../core/text.js';
@@ -40,7 +44,7 @@ export class Editor extends EventTarget {
     this.history.clear(); this.editingTextId = null; this.hoverId = null; this.tool = 'move';
     this._index = null;
     this.refitText();
-    for (const page of doc.pages) this.relayout(page);
+    this.relayout(doc.pages);
     this.zoomToFit(false);
     this.emit({ doc: true, selection: true, file: true, page: true });
   }
@@ -65,13 +69,20 @@ export class Editor extends EventTarget {
     this.dispatchEvent(Object.assign(new Event('change'), { what }));
   }
 
-  // Groups take the size of their content, auto layout frames place theirs. Runs after every change, also mid-drag,
-  // so a frame that hugs grows while you type or drag inside it.
-  relayout(page = this.page) {
-    if (!page) return;
-    fitGroups(page.children);
-    applyLayout(page.children, { fitText: n => this.fit(n), skip: this.floating });
-    fitGroups(page.children);
+  // Instances copy their component again, groups take the size of their content, auto layout frames place theirs
+  // and colour variables fill in their colours. Runs after every change, also mid-drag, so a frame that hugs grows
+  // while you type or drag inside it and instances follow their component live. Only the page on screen is laid out
+  // while you work; every page when a change is done.
+  relayout(pages = [this.page]) {
+    if (!this.doc) return;
+    syncInstances(this.doc, n => this.fit(n));
+    for (const page of pages) {
+      if (!page) continue;
+      fitGroups(page.children);
+      applyLayout(page.children, { fitText: n => this.fit(n), skip: this.floating });
+      fitGroups(page.children);
+    }
+    applyVariables(this.doc);
     this._index = null;
   }
 
@@ -79,7 +90,7 @@ export class Editor extends EventTarget {
   state() { return { doc: this.doc, selection: this.selection, pageId: this.pageId }; }
   begin() { this.history.begin(this.state()); }
   commit() {
-    this.relayout();
+    this.relayout(this.doc.pages);
     if (this.history.commit(this.state())) { this.dirty = true; this.emit({ file: true }); }
   }
   // One undo step around fn.
@@ -176,7 +187,8 @@ export class Editor extends EventTarget {
       if (this.selection.some(id => index.get(id)?.parent?.id === path[i].id)) return path[i + 1].id;
     }
     const top = path[0];
-    if (top.type === 'frame' && top.children.length) return path[1]?.id ?? null;
+    // An instance is picked as a whole; double-click goes into it.
+    if (top.type === 'frame' && top.children.length && !top.instanceOf) return path[1]?.id ?? null;
     return top.id;
   }
 
@@ -191,6 +203,8 @@ export class Editor extends EventTarget {
         if (!n.children || !n.visible || skip(n.id)) continue;
         const r = { x: ox + n.x, y: oy + n.y, w: n.w, h: n.h };
         if (!pointInRect(p, r)) continue;
+        // Nothing can be put into an instance: it shows its component's content.
+        if (n.instanceOf) return;
         // Groups are looked through: a frame inside a group can still take the layers.
         if (n.type === 'group') { const before = found; search(n.children, r.x, r.y); if (found !== before) return; continue; }
         found = n; search(n.children, r.x, r.y); return;
@@ -231,9 +245,12 @@ export class Editor extends EventTarget {
     for (const id of ids) {
       const node = this.node(id);
       if (!node) continue;
-      const values = typeof patch === 'function' ? patch(node) : patch;
+      let values = typeof patch === 'function' ? patch(node) : patch;
       if (!values) continue;
-      if (node.type === 'text' && 'text' in values && node.name === textName(node.text)) node.name = textName(values.text);
+      if (node.type === 'text' && 'text' in values && node.name === textName(node.text)) values = { ...values, name: textName(values.text) };
+      // In an instance only what may differ from the component is taken, and remembered as an override.
+      const owner = ownerInstance(this.index, id) || (node.instanceOf ? node : null);
+      if (owner) values = overrideValues(owner, node, values);
       // What is inside a frame or group follows its new size (constraints, or scaling for a group).
       const resized = node.children && (('w' in values && values.w !== node.w) || ('h' in values && values.h !== node.h));
       const before = resized ? structuredClone(node) : null;
@@ -254,10 +271,10 @@ export class Editor extends EventTarget {
   }
 
   deleteSelection() {
-    if (!this.selection.length) return;
+    if (!this.movable(this.selection).length) return;
     this.transact(() => {
-      for (const id of topLevelOnly(this.index, this.selection)) { detach(this.page, this.index, id); this._index = null; }
-      this.selection = [];
+      for (const id of this.movable(topLevelOnly(this.index, this.selection))) { detach(this.page, this.index, id); this._index = null; }
+      this.selection = this.selection.filter(id => this.index.has(id));
     });
   }
 
@@ -265,23 +282,23 @@ export class Editor extends EventTarget {
   duplicateSelection(offset = { x: 0, y: 0 }, { transaction = true } = {}) {
     const run = () => {
       const index = this.index;
-      const copies = topLevelOnly(index, this.selection).map(id => {
+      const copies = this.movable(topLevelOnly(index, this.selection)).map(id => {
         const { node, parent } = index.get(id);
-        const copy = cloneWithNewIds(node);
+        const copy = this.copyOf(node);
         copy.x += offset.x; copy.y += offset.y;
         const list = childrenOf(this.page, parent);
         list.splice(list.indexOf(node) + 1, 0, copy);
         return copy.id;
       });
       this._index = null;
-      this.selection = copies;
+      if (copies.length) this.selection = copies;
     };
     if (transaction) this.transact(run); else run();
   }
 
   // Arrow keys. In an auto layout frame the arrows along its direction move the layer earlier or later instead.
   nudge(dx, dy) {
-    const ids = topLevelOnly(this.index, this.selection);
+    const ids = this.movable(topLevelOnly(this.index, this.selection));
     if (!ids.length) return;
     this.transact(() => {
       for (const id of ids) {
@@ -313,8 +330,8 @@ export class Editor extends EventTarget {
   // Moves layers in the tree: into `parent` (null = page) at position `at` of its children (the end is on top).
   moveLayers(ids, parent, at) {
     const index = this.index;
-    ids = topLevelOnly(index, ids).filter(id => !parent || (id !== parent.id && !isAncestor(index, id, parent.id)));
-    if (!ids.length) return;
+    ids = this.movable(topLevelOnly(index, ids)).filter(id => !parent || (id !== parent.id && !isAncestor(index, id, parent.id)));
+    if (!ids.length || (parent && !this.canHold(parent, ids.map(id => this.node(id))))) return;
     this.transact(() => {
       const list = childrenOf(this.page, parent);
       const nodes = ids.map(id => this.node(id));
@@ -332,7 +349,7 @@ export class Editor extends EventTarget {
   // Bring forward (+1) / send backward (-1), or to the front / back (±Infinity).
   arrange(step) {
     const index = this.index;
-    const ids = topLevelOnly(index, this.selection);
+    const ids = this.movable(topLevelOnly(index, this.selection));
     if (!ids.length) return;
     this.transact(() => {
       const moving = step > 0 ? [...ids].reverse() : ids;
@@ -366,12 +383,12 @@ export class Editor extends EventTarget {
 
   // Wraps the selection in a new group (Ctrl+G) or frame (Ctrl+Alt+G) in the parent of the topmost layer.
   wrap(type) {
-    if (!this.selection.length) return;
+    if (!this.movable(this.selection).length) return;
     this.transact(() => this.wrapIn(type));
   }
   wrapIn(type) {
-    const ids = this.zOrdered(topLevelOnly(this.index, this.selection));
-    if (!ids.length) return;
+    const ids = this.zOrdered(this.movable(topLevelOnly(this.index, this.selection)));
+    if (!ids.length) return null;
     {
       const index = this.index;
       const top = index.get(ids.at(-1));
@@ -385,12 +402,13 @@ export class Editor extends EventTarget {
       this._index = null;
       for (const id of ids) { reparent(this.page, this.index, id, wrapper); this._index = null; }
       this.selection = [wrapper.id];
+      return wrapper;
     }
   }
 
   // Ctrl+Shift+G: takes the content out of selected groups (and frames), keeping it where it is.
   unwrap() {
-    const containers = this.selectedNodes.filter(n => n.children);
+    const containers = this.selectedNodes.filter(n => n.children && !n.instanceOf && this.movable([n.id]).length);
     if (!containers.length) return;
     this.transact(() => {
       const freed = [];
@@ -420,7 +438,7 @@ export class Editor extends EventTarget {
   // One layer lines up in its parent frame; several line up with each other.
   align(how) {
     const index = this.index;
-    const ids = topLevelOnly(index, this.selection);
+    const ids = this.movable(topLevelOnly(index, this.selection));
     if (!ids.length) return;
     let box;
     if (ids.length === 1) {
@@ -433,14 +451,14 @@ export class Editor extends EventTarget {
 
   distribute(axis) {
     const index = this.index;
-    const ids = topLevelOnly(index, this.selection);
+    const ids = this.movable(topLevelOnly(index, this.selection));
     if (ids.length < 3) return;
     this.transact(() => this.placeAbsolute(ids, distribute(ids.map(id => absoluteRect(index, id)), axis)));
   }
 
   tidyUp() {
     const index = this.index;
-    const ids = topLevelOnly(index, this.selection);
+    const ids = this.movable(topLevelOnly(index, this.selection));
     if (ids.length < 2) return;
     this.transact(() => this.placeAbsolute(ids, tidy(ids.map(id => absoluteRect(index, id)))));
   }
@@ -449,10 +467,10 @@ export class Editor extends EventTarget {
   // Shift+A: a selected frame gets auto layout (read from how its content is placed now); other layers are wrapped in
   // a new frame with auto layout first.
   addAutoLayout() {
-    const sel = this.selectedNodes;
-    if (!sel.length) return;
+    const sel = this.selectedNodes.filter(n => this.movable([n.id]).length);
+    if (!sel.length || sel.length < this.selection.length) return;
     const single = sel.length === 1 && sel[0].type === 'frame' ? sel[0] : null;
-    if (single?.layout) return;
+    if (single?.layout || single?.instanceOf) return;
     this.transact(() => {
       let frame = single;
       if (!frame) {
@@ -465,7 +483,7 @@ export class Editor extends EventTarget {
     });
   }
   removeAutoLayout() {
-    const frames = this.selectedNodes.filter(n => n.layout);
+    const frames = this.selectedNodes.filter(n => n.layout && !n.instanceOf && this.movable([n.id]).length);
     if (!frames.length) return;
     this.transact(() => {
       for (const f of frames) {
@@ -540,6 +558,180 @@ export class Editor extends EventTarget {
     return { x: c.x + this.viewport.w / 2 / c.zoom, y: c.y + this.viewport.h / 2 / c.zoom };
   }
 
+  // ---------- components and instances ----------
+  // Layers inside an instance show their component's content: they can be restyled (overrides) but not moved,
+  // resized, deleted or regrouped. These are the ids that can.
+  movable(ids) { return ids.filter(id => this.index.has(id) && !ownerInstance(this.index, id)); }
+
+  // Can `parent` take these layers? Not an instance (or a layer in one), and a component can't end up inside
+  // itself, also not through an instance of it (nodes may be stand-ins like { instanceOf }).
+  canHold(parent, nodes = []) {
+    if (!parent.children || parent.instanceOf || ownerInstance(this.index, parent.id)) return false;
+    const hosts = [];
+    for (let p = parent; p; p = this.index.get(p.id)?.parent) if (p.component) hosts.push(p.id);
+    if (!hosts.length) return true;
+    const comps = componentMap(this.doc);
+    let bad = false;
+    walk(nodes.filter(Boolean), n => {
+      if (bad) return false;
+      const c = n.instanceOf || (n.component && n.id);
+      if (c && hosts.some(h => dependsOn(comps, c, h))) bad = true;
+    });
+    return !bad;
+  }
+
+  // A copy for duplicate and paste: new ids, a copied component becomes an instance of it (there is one main
+  // copy), and what came from another design loses the components and colour variables that aren't in this one.
+  copyOf(node) {
+    const copy = cloneWithNewIds(node);
+    const comps = componentMap(this.doc);
+    instancify(copy, node, id => comps.has(id));
+    const strip = n => { delete n.ref; if (!n.instanceOf) n.children?.forEach(strip); };
+    strip(copy);
+    walk([copy], n => { if (n.instanceOf && !comps.has(n.instanceOf)) detachInstance(n); });
+    unbindVariables([copy], new Set(this.doc.variables.map(v => v.id)));
+    return copy;
+  }
+
+  components() {
+    const list = [];
+    for (const page of this.doc.pages) walk(page.children, n => { if (n.component) list.push({ node: n, page }); });
+    return list;
+  }
+
+  // Ctrl+Alt+K: the selected frame becomes a component, or the selection is wrapped in a new one.
+  createComponent() {
+    const sel = this.selectedNodes;
+    if (!sel.length || this.movable(this.selection).length < sel.length || (sel.length === 1 && sel[0].component)) return null;
+    let comp = null;
+    this.transact(() => {
+      const single = sel.length === 1 && sel[0].type === 'frame' && !sel[0].instanceOf ? sel[0] : null;
+      comp = single || this.wrapIn('frame');
+      if (!comp) return;
+      if (!single) comp.name = sel.length === 1 ? sel[0].name : 'Component';
+      comp.component = true;
+      this.selection = [comp.id];
+    });
+    return comp;
+  }
+
+  // A new instance with its middle (or top-left) at world point `at`, in the frame there when it can hold it.
+  createInstance(componentId, at = this.viewCenter(), { center = true } = {}) {
+    const found = findComponent(this.doc, componentId);
+    if (!found) return null;
+    let inst = null;
+    this.transact(() => {
+      const target = this.frameAt(at);
+      const holder = target && this.canHold(target, [{ instanceOf: componentId }]) ? target : null;
+      const origin = holder ? absolute(this.index, holder.id) : { x: 0, y: 0 };
+      const comp = found.node;
+      inst = makeInstance(comp, { x: Math.round(at.x - (center ? comp.w / 2 : 0) - origin.x), y: Math.round(at.y - (center ? comp.h / 2 : 0) - origin.y) });
+      childrenOf(this.page, holder).push(inst);
+      this._index = null;
+      this.selection = [inst.id];
+    });
+    return inst;
+  }
+
+  // Ctrl+Alt+B: selected instances become ordinary frames with the content they show.
+  detachInstances() {
+    const list = this.selectedNodes.filter(n => n.instanceOf && this.movable([n.id]).length);
+    if (list.length) this.transact(() => list.forEach(detachInstance));
+  }
+
+  // The overrides a layer (and what is inside it) has in its instance; for an instance itself all of them.
+  overridesOf(id) {
+    const node = this.node(id);
+    if (!node) return [];
+    const owner = ownerInstance(this.index, id);
+    if (!owner) return node.instanceOf ? Object.keys(node.overrides || {}) : [];
+    return Object.keys(owner.overrides || {}).filter(key => key === node.ref || key.startsWith(`${node.ref};`));
+  }
+  resetOverrides(ids = this.selection) {
+    this.transact(() => {
+      for (const id of ids) {
+        const node = this.node(id), owner = ownerInstance(this.index, id);
+        const keys = this.overridesOf(id);
+        const from = owner || node;
+        for (const key of keys) delete from.overrides[key];
+      }
+    });
+  }
+
+  // Shows the main component of an instance (for a layer inside one: the same layer in the main component).
+  goToComponent(id) {
+    const node = this.node(id);
+    if (!node) return false;
+    const owner = ownerInstance(this.index, id);
+    const found = findComponent(this.doc, node.instanceOf || owner?.instanceOf);
+    if (!found) return false;
+    const target = node.instanceOf ? found.node.id : node.ref;
+    this.setPage(found.page.id);
+    this.select([target]);
+    this.zoomToRect(this.selectionBounds(), 1);
+    return true;
+  }
+
+  // Another component for an instance: its own changes go, its size becomes the new component's.
+  swapInstance(id, componentId) {
+    const node = this.node(id), found = findComponent(this.doc, componentId);
+    if (!node?.instanceOf || !found || node.instanceOf === componentId || !this.movable([id]).length) return;
+    const parent = this.index.get(id).parent;
+    if (parent && !this.canHold(parent, [{ instanceOf: componentId }])) return;
+    const old = findComponent(this.doc, node.instanceOf)?.node;
+    const c = found.node;
+    this.transact(() => {
+      Object.assign(node, { instanceOf: componentId, overrides: {}, w: c.w, h: c.h, widthMode: c.widthMode, heightMode: c.heightMode });
+      if (!old || node.name === old.name) node.name = c.name;
+    });
+  }
+
+  // Instances of a component on this page (not the ones inside other instances).
+  instancesOf(componentId) {
+    const ids = [];
+    walk(this.page.children, n => { if (n.instanceOf) { if (n.instanceOf === componentId) ids.push(n.id); return false; } });
+    return ids;
+  }
+
+  // ---------- colour variables ----------
+  variable(id) { return this.doc.variables.find(v => v.id === id) || null; }
+  // Without an undo step of its own (the colour picker makes one of its whole session).
+  addVariableLive(color, name) {
+    const v = colorVariable(name || `Colour ${this.doc.variables.length + 1}`, color);
+    this.doc.variables.push(v);
+    this.emit({ doc: true, variables: true });
+    return v;
+  }
+  addVariable(color, name) { let v; this.transact(() => { v = this.addVariableLive(color, name); }); this.emit({ variables: true }); return v; }
+  setVariable(id, patch) {
+    const v = this.variable(id);
+    if (!v) return;
+    Object.assign(v, patch);
+    this.emit({ doc: true, variables: true });
+  }
+  updateVariable(id, patch) { this.transact(() => this.setVariable(id, patch)); this.emit({ variables: true }); }
+  deleteVariable(id) {
+    this.transact(() => {
+      this.doc.variables = this.doc.variables.filter(v => v.id !== id);
+      const keep = new Set(this.doc.variables.map(v => v.id));
+      for (const page of this.doc.pages) unbindVariables(page.children, keep);
+    });
+    this.emit({ variables: true });
+  }
+  // The variable as the top solid fill of the selected layers (added when they have none).
+  useVariableAsFill(id, ids = this.selection) {
+    const v = this.variable(id);
+    if (!v) return;
+    this.update(ids, n => {
+      if (n.type === 'group') return null;
+      const fills = structuredClone(n.fills || []);
+      const at = fills.findLastIndex(p => p.type === 'solid');
+      if (at >= 0) fills[at] = { ...fills[at], color: v.color, variable: v.id };
+      else fills.push({ ...solid(v.color), variable: v.id });
+      return { fills };
+    });
+  }
+
   // ---------- clipboard ----------
   copy() {
     const index = this.index;
@@ -567,11 +759,12 @@ export class Editor extends EventTarget {
     if (!this.clipboard?.length) return;
     this.transact(() => {
       // Into the selected frame if there is one, otherwise next to the originals (or on the page).
-      const target = this.selectedNodes.length === 1 && this.selectedNodes[0].type === 'frame' ? this.selectedNodes[0] : null;
+      const sel = this.selectedNodes[0];
+      const target = this.selectedNodes.length === 1 && sel.type === 'frame' && this.canHold(sel) ? sel : null;
       const origin = target ? absolute(this.index, target.id) : { x: 0, y: 0 };
       const ids = [];
       for (const { node, abs } of this.clipboard) {
-        const copy = cloneWithNewIds(node);
+        const copy = this.copyOf(node);
         copy.x = abs.x - origin.x + (target ? 0 : 20); copy.y = abs.y - origin.y + (target ? 0 : 20);
         childrenOf(this.page, target).push(copy);
         ids.push(copy.id);
@@ -595,7 +788,7 @@ export class Editor extends EventTarget {
     this.editingTextId = null;
     const node = this.node(id);
     // An empty text layer disappears, as in other editors.
-    if (node && !node.text.trim()) { detach(this.page, this.index, id); this._index = null; this.selection = this.selection.filter(s => s !== id); }
+    if (node && !node.text.trim() && !ownerInstance(this.index, id)) { detach(this.page, this.index, id); this._index = null; this.selection = this.selection.filter(s => s !== id); }
     if (commit) this.commit(); else this.history.cancel();
     this.emit({ doc: true, selection: true, editing: true });
   }

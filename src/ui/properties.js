@@ -1,6 +1,7 @@
 // Right panel: the properties of the selection, in collapsible sections. The panel is rebuilt when the selection
 // changes and only refreshed (values, not elements) while the layers change, so a field being typed in keeps focus.
-import { walk } from '../core/document.js';
+import { ownerInstance } from '../core/components.js';
+import { absoluteRect, walk } from '../core/document.js';
 import { evaluate } from '../core/expr.js';
 import { normalizeHex, paintCss, solid, stroke } from '../core/paint.js';
 import { inFlow } from '../core/layout.js';
@@ -48,6 +49,14 @@ export function attachProperties(root, editor, { fonts, onExport, onPickImage })
     b.addEventListener('click', onClick);
     return b;
   };
+  const textButton = (name, label, onClick) => {
+    const b = document.createElement('button');
+    b.className = 'text-btn'; b.innerHTML = `${icon(name)}<span></span>`;
+    b.lastChild.textContent = t(label);
+    b.addEventListener('click', onClick);
+    return b;
+  };
+  const hint = text => Object.assign(document.createElement('p'), { className: 'hint mixed-hint', textContent: text });
 
   // One value over the whole selection: the value, or null when the layers differ ("Mixed").
   const common = get => {
@@ -127,7 +136,7 @@ export function attachProperties(root, editor, { fonts, onExport, onPickImage })
 
   // A swatch that opens the colour picker; changes are live and form one undo step.
   // getPaint() → paint; apply(paint) changes the layers (without an undo step).
-  function swatch(getPaint, apply, { gradients = false, opacity = true } = {}) {
+  function swatch(getPaint, apply, { gradients = false, opacity = true, variables = true } = {}) {
     const b = document.createElement('button');
     b.className = 'swatch-btn';
     b.innerHTML = '<span></span>';
@@ -136,9 +145,12 @@ export function attachProperties(root, editor, { fonts, onExport, onPickImage })
       const paint = getPaint();
       if (!paint) return;
       if (paint.type === 'image') { const asset = await onPickImage?.(); if (asset) { editor.assets.set(asset.id, asset); editor.update(ids(), n => ({ fills: n.fills.map(f => f === paintOf(n, paint) ? { ...f, asset: asset.id } : f) })); } return; }
+      const start = () => { if (!live) { live = true; editor.begin(); } };
       openColorPicker(b, {
         paint, gradients, opacity, documentColors: documentColors(),
-        onChange: p => { if (!live) { live = true; editor.begin(); } apply(p); },
+        variables: variables ? editor.doc.variables : null,
+        onCreateVariable: hex => { start(); return editor.addVariableLive(hex, t('Colour {0}', editor.doc.variables.length + 1)); },
+        onChange: p => { start(); apply(p); },
         onClose: () => { if (live) { live = false; editor.commit(); editor.emit({ doc: true }); } }
       });
     });
@@ -167,6 +179,23 @@ export function attachProperties(root, editor, { fonts, onExport, onPickImage })
     refreshers.push(refresh);
     return input;
   }
+
+  // A colour bound to a variable shows the variable's name instead of the hex code; the link button unbinds it.
+  function varChip(get, unbind, open) {
+    const chip = document.createElement('div');
+    chip.className = 'var-chip';
+    chip.innerHTML = `${icon('variable')}<span class="var-name"></span>`;
+    chip.title = t('Colour variable');
+    chip.addEventListener('click', e => { if (!e.target.closest('button')) open(); });
+    chip.append(iconButton('unlink', 'Detach variable', unbind));
+    refreshers.push(() => {
+      const v = get()?.variable && editor.variable(get().variable);
+      chip.hidden = !v;
+      if (v) chip.querySelector('.var-name').textContent = v.name;
+    });
+    return chip;
+  }
+  const bound = p => !!(p?.variable && editor.variable(p.variable));
 
   function segmented(options, get, set) {
     const wrap = document.createElement('div');
@@ -274,12 +303,15 @@ export function attachProperties(root, editor, { fonts, onExport, onPickImage })
     label, title: opts.title, min: opts.min, max: opts.max, scale: opts.scale, suffix: opts.suffix, step: opts.step,
     get: n => n[key][i][prop], set: (n, v) => ({ [key]: n[key].map((x, j) => j === i ? { ...x, [prop]: v } : x) })
   });
+  const withColor = (x, p) => { const y = { ...x, color: p.color, opacity: p.opacity }; if (p.variable) y.variable = p.variable; else delete y.variable; return y; };
   const itemColor = (key, i) => {
     const get = () => nodes()[0]?.[key]?.[i];
-    const sw = swatch(() => { const x = get(); return x && solid(x.color, x.opacity); },
-      p => editor.setProps(ids(), n => ({ [key]: n[key].map((x, j) => j === i ? { ...x, color: p.color, opacity: p.opacity } : x) })));
-    const hex = hexField(() => get()?.color, hex => editor.update(ids(), n => ({ [key]: n[key].map((x, j) => j === i ? { ...x, color: hex } : x) })));
-    return [sw, hex];
+    const sw = swatch(() => { const x = get(); return x && { ...solid(x.color, x.opacity), ...(x.variable ? { variable: x.variable } : {}) }; },
+      p => editor.setProps(ids(), n => ({ [key]: n[key].map((x, j) => j === i ? withColor(x, p) : x) })));
+    const hex = hexField(() => get()?.color, hex => editor.update(ids(), n => ({ [key]: n[key].map((x, j) => j === i ? withColor(x, { color: hex, opacity: x.opacity }) : x) })));
+    const chip = varChip(get, () => editor.update(ids(), n => ({ [key]: n[key].map((x, j) => j === i ? withColor(x, { color: x.color, opacity: x.opacity }) : x) })), () => sw.click());
+    refreshers.push(() => { hex.hidden = bound(get()); });
+    return [sw, hex, chip];
   };
   const listItem = (...rows) => { const d = document.createElement('div'); d.className = 'list-item'; d.append(...rows); return d; };
 
@@ -297,21 +329,22 @@ export function attachProperties(root, editor, { fonts, onExport, onPickImage })
       const sw = swatch(get, p => editor.setProps(ids(), n => ({ fills: n.fills.map((x, j) => j === i ? p : x) })), { gradients: true });
       const label = document.createElement('span');
       label.className = 'paint-label';
-      const hex = hexField(() => get()?.color, hex => setList(list => { list[i].color = hex; return list; }));
+      const hex = hexField(() => get()?.color, hex => setList(list => { list[i].color = hex; delete list[i].variable; return list; }));
+      const chip = varChip(get, () => setList(list => { delete list[i].variable; return list; }), () => sw.click());
       const fit = document.createElement('select');
       for (const [v, l] of [['fill', 'Fill'], ['fit', 'Fit'], ['stretch', 'Stretch'], ['tile', 'Tile']]) fit.add(new Option(t(l), v));
       fit.addEventListener('change', () => setList(list => { list[i].fit = fit.value; return list; }));
       fit.addEventListener('keydown', e => e.stopPropagation());
       refreshers.push(() => {
         const p = get(); if (!p) return;
-        hex.hidden = p.type !== 'solid'; fit.hidden = p.type !== 'image'; label.hidden = p.type === 'solid' || p.type === 'image';
+        hex.hidden = p.type !== 'solid' || bound(p); fit.hidden = p.type !== 'image'; label.hidden = p.type === 'solid' || p.type === 'image';
         if (p.type === 'image') fit.value = p.fit;
         label.textContent = t(p.type === 'linear' ? 'Linear' : 'Radial');
       });
       label.addEventListener('click', () => sw.click());
       const op = itemNumber('fills', i, 'opacity', '', { min: 0, max: 1, scale: 100, suffix: '%' });
       op.classList.add('narrow');
-      return listItem(row(sw, hex, label, fit, op, ...rowTail('fills', i, setList)));
+      return listItem(row(sw, hex, chip, label, fit, op, ...rowTail('fills', i, setList)));
     }
   });
 
@@ -391,7 +424,8 @@ export function attachProperties(root, editor, { fonts, onExport, onPickImage })
   function layoutSection() {
     const frames = nodes();
     const has = frames.every(n => n.layout);
-    const action = has
+    if (frames.some(n => n.instanceOf) && !has) return null;
+    const action = frames.some(n => n.instanceOf) ? null : has
       ? iconButton('minus', 'Remove auto layout', () => editor.removeAutoLayout())
       : iconButton('plus', 'Add auto layout', () => editor.addAutoLayout());
     if (!has) return section('Auto layout', frames.some(n => n.layout) ? Object.assign(document.createElement('p'), { className: 'hint mixed-hint', textContent: t('Mixed') }) : null, action);
@@ -478,6 +512,51 @@ export function attachProperties(root, editor, { fonts, onExport, onPickImage })
     return bar;
   }
 
+  // ---------- components and instances ----------
+  function componentSection(n) {
+    const count = hint('');
+    refreshers.push(() => { const k = editor.instancesOf(n.id).length; count.textContent = t(k === 1 ? '{0} instance on this page' : '{0} instances on this page', k); });
+    const add = textButton('instance', 'Create instance', () => {
+      const r = absoluteRect(editor.index, n.id);
+      editor.createInstance(n.id, { x: r.x + r.w + 40, y: r.y }, { center: false });
+    });
+    const pick = textButton('component', 'Select instances', () => editor.select(editor.instancesOf(n.id)));
+    refreshers.push(() => { pick.disabled = !editor.instancesOf(n.id).length; });
+    return section('Component', [row(add, pick), count]);
+  }
+
+  function instanceSection(n) {
+    const owner = ownerInstance(editor.index, n.id);
+    const reset = textButton('reset', 'Reset', () => editor.resetOverrides([n.id]));
+    reset.title = t('Reset changes');
+    refreshers.push(() => {
+      const k = editor.overridesOf(n.id).length;
+      reset.disabled = !k;
+      reset.lastChild.textContent = k ? `${t('Reset')} (${k})` : t('No changes');
+    });
+    if (owner) {
+      // A layer inside an instance (or an instance nested in one).
+      return section('Instance', [hint(t('Part of instance “{0}”. Position and size come from the main component.', owner.name)),
+        row(reset, iconButton('go-to', 'Go to main component', () => editor.goToComponent(n.id)))]);
+    }
+    const comps = editor.components();
+    const swap = document.createElement('select');
+    for (const c of comps) swap.add(new Option(c.node.name, c.node.id));
+    const missing = !comps.some(c => c.node.id === n.instanceOf);
+    if (missing) swap.add(new Option(t('Main component is missing'), n.instanceOf));
+    swap.value = n.instanceOf;
+    swap.title = t('Swap for another component');
+    swap.addEventListener('change', () => editor.swapInstance(n.id, swap.value));
+    swap.addEventListener('keydown', e => e.stopPropagation());
+    const go = iconButton('go-to', 'Go to main component', () => editor.goToComponent(n.id));
+    go.disabled = missing;
+    const detach = textButton('detach', 'Detach', () => editor.detachInstances());
+    detach.title = t('Detach instance') + '  (Ctrl+Alt+B)';
+    const kind = document.createElement('span');
+    kind.className = 'cap kind-icon'; kind.innerHTML = icon('instance');
+    return section('Instance', [row(kind, swap, go), row(detach, reset)]);
+  }
+
   // ---------- the panel per selection ----------
   function presetList(onPick) {
     const wrap = document.createElement('div');
@@ -505,21 +584,27 @@ export function attachProperties(root, editor, { fonts, onExport, onPickImage })
       if (editor.tool === 'frame') parts.push(section('Frame presets', presetList(p => editor.addFramePreset(p))));
       const page = editor.page;
       const bg = () => page.background || '#1e1f23';
-      const sw = swatch(() => solid(bg()), p => { page.background = p.color; editor.emit({ doc: true }); }, { opacity: false });
+      const sw = swatch(() => solid(bg()), p => { page.background = p.color; editor.emit({ doc: true }); }, { opacity: false, variables: false });
       const hex = hexField(bg, v => editor.transact(() => { page.background = v; }));
       parts.push(section('Page', row(sw, hex, Object.assign(document.createElement('span'), { className: 'muted', textContent: t('Background') }))));
     } else {
       const types = new Set(sel.map(n => n.type));
       const only = type => types.size === 1 && types.has(type);
+      const one = sel.length === 1 ? sel[0] : null;
+      const inInstance = sel.some(n => ownerInstance(editor.index, n.id));
       const head = document.createElement('div');
-      head.className = 'prop-title';
-      head.innerHTML = sel.length === 1 ? icon(sel[0].layout ? 'auto-layout' : sel[0].type) : icon('group');
-      head.append(sel.length === 1 ? t(sel[0].layout ? 'Auto layout' : typeLabel[sel[0].type]) : t('{0} layers', sel.length));
+      head.className = 'prop-title' + (one?.component || one?.instanceOf || inInstance ? ' kind-component' : '');
+      const kind = one ? (one.component ? 'component' : one.instanceOf ? 'instance' : one.layout ? 'auto-layout' : one.type) : 'group';
+      head.innerHTML = icon(kind);
+      head.append(one ? t(one.component ? 'Component' : one.instanceOf ? 'Instance' : one.layout ? 'Auto layout' : typeLabel[one.type]) : t('{0} layers', sel.length));
       parts.push(head);
-      const bar = alignSection();
+      const bar = inInstance ? null : alignSection();
       if (bar) parts.push(bar);
+      if (one?.component) parts.push(componentSection(one));
+      if (one && (one.instanceOf || inInstance)) parts.push(instanceSection(one));
 
-      if (only('frame')) {
+      if (only('frame') && inInstance) parts.push(section('Frame', row(checkbox('Clip content', n => n.clip, (n, v) => ({ clip: v })))));
+      else if (only('frame')) {
         const presetSelect = document.createElement('select');
         presetSelect.add(new Option(t('Choose…'), ''));
         for (const g of framePresets) {
@@ -536,7 +621,7 @@ export function attachProperties(root, editor, { fonts, onExport, onPickImage })
         parts.push(section('Frame', [row(presetSelect), row(checkbox('Clip content', n => n.clip, (n, v) => ({ clip: v })))]));
       }
 
-      parts.push(section('Position', [
+      if (!inInstance) parts.push(section('Position', [
         row(number({ label: 'X', get: n => n.x, set: (n, v) => ({ x: v }) }), number({ label: 'Y', get: n => n.y, set: (n, v) => ({ y: v }) })),
         types.has('group') ? null : row(
           number({ label: 'W', min: 1, get: n => n.w, set: (n, v) => ({ w: v, widthMode: 'fixed', ...(n.type === 'text' && n.sizing === 'auto-width' ? { sizing: 'auto-height' } : {}) }) }),
@@ -546,8 +631,9 @@ export function attachProperties(root, editor, { fonts, onExport, onPickImage })
         sel.every(n => editor.index.get(n.id)?.parent?.layout)
           ? row(checkbox('Ignore auto layout', n => !!n.absolute, (n, v) => ({ absolute: v }))) : null
       ]));
-      if (only('frame')) parts.push(layoutSection());
-      const cons = constraintsSection();
+      const lay = only('frame') && !inInstance ? layoutSection() : null;
+      if (lay) parts.push(lay);
+      const cons = inInstance ? null : constraintsSection();
       if (cons) parts.push(cons);
 
       const radius = [...types].every(x => x === 'rect' || x === 'frame');
@@ -566,7 +652,7 @@ export function attachProperties(root, editor, { fonts, onExport, onPickImage })
           row(segmented([
             { value: 'left', icon: 'align-left', title: 'Align left' }, { value: 'center', icon: 'align-center', title: 'Align center' },
             { value: 'right', icon: 'align-right', title: 'Align right' }
-          ], n => n.align, (n, v) => ({ align: v })), segmented([
+          ], n => n.align, (n, v) => ({ align: v })), inInstance ? null : segmented([
             { value: 'auto-width', icon: 'auto-width', title: 'Auto width' }, { value: 'auto-height', icon: 'auto-height', title: 'Auto height' },
             { value: 'fixed', icon: 'fixed', title: 'Fixed size' }
           ], n => n.sizing, (n, v) => ({ sizing: v })))
@@ -584,7 +670,7 @@ export function attachProperties(root, editor, { fonts, onExport, onPickImage })
   editor.addEventListener('change', ({ what }) => {
     if (!editor.doc) return;
     // Rebuilt when what the panel shows changes: other layers, or auto layout switched on or off (here or around).
-    const shape = n => `${n.type}${n.layout ? ':L' : ''}${editor.index.get(n.id)?.parent?.layout ? ':P' : ''}`;
+    const shape = n => `${n.type}${n.layout ? ':L' : ''}${editor.index.get(n.id)?.parent?.layout ? ':P' : ''}${n.component ? ':C' : ''}${n.instanceOf ? `:I${n.instanceOf}` : ''}`;
     const sig = `${editor.pageId}|${editor.tool}|${editor.selection.join(',')}|${editor.selectedNodes.map(shape).join(',')}`;
     if (sig !== signature || what.page) { signature = sig; build(); }
     else if (what.doc) refresh();

@@ -7,7 +7,7 @@ const skip = new Set(['node_modules', 'dist', '.git']);
 const files = [];
 (function walk(dir) {
   for (const name of readdirSync(dir)) {
-    if (skip.has(name)) continue;
+    if (skip.has(name) || name.startsWith('dist')) continue;
     const p = join(dir, name);
     if (statSync(p).isDirectory()) walk(p);
     else if (/\.(mjs|cjs|js)$/.test(name)) files.push(p);

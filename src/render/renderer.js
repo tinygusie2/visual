@@ -1,6 +1,8 @@
 // Draws a page on the editor <canvas>: the design in world space (draw.js), then the editor's overlays in screen
-// space: frame names, hover, selection and handles, snap guides, distances and the selection rectangle.
+// space: frame names, hover, selection and handles, snap guides, distances and the selection rectangle. Components
+// and instances are outlined and named in purple, like in other design tools.
 // Nothing is drawn with DOM elements, so thousands of layers stay cheap.
+import { ownerInstance } from '../core/components.js';
 import { absoluteRect } from '../core/document.js';
 import { fontString } from '../core/text.js';
 import { drawNode } from './draw.js';
@@ -9,6 +11,7 @@ import { readyImage } from './images.js';
 export { measurer } from './draw.js';
 export const SELECT = '#4f8cff';
 export const GUIDE = '#f24e6b';
+export const COMPONENT = '#a47bff'; // components, instances and what is inside them
 export const HANDLE_SIZE = 8;
 
 export class Renderer {
@@ -72,25 +75,31 @@ export class Renderer {
     ctx.font = '500 11px "Google Sans Flex", system-ui, sans-serif';
     ctx.textBaseline = 'bottom'; ctx.textAlign = 'left'; ctx.letterSpacing = '0px';
 
-    // Names above top-level frames (click them to select the frame).
+    // Names above top-level frames (click them to select the frame); components get a filled diamond, instances an
+    // open one.
     for (const node of editor.page.children) {
       if (node.type !== 'frame' || !node.visible) continue;
       const r = scr(node);
-      ctx.fillStyle = selected.has(node.id) ? SELECT : node.id === editor.hoverId ? '#c9cbd2' : '#8b8e97';
-      ctx.fillText(fitLabel(ctx, node.name, Math.max(r.w, 40)), r.x, r.y - 4);
+      const kind = node.component || node.instanceOf;
+      ctx.fillStyle = kind ? (selected.has(node.id) || node.id === editor.hoverId ? '#c5adff' : COMPONENT)
+        : selected.has(node.id) ? SELECT : node.id === editor.hoverId ? '#c9cbd2' : '#8b8e97';
+      let x = r.x;
+      if (kind) { diamond(ctx, x + 4, r.y - 10, 3.6, !!node.component); x += 12; }
+      ctx.fillText(fitLabel(ctx, node.name, Math.max(r.w - (x - r.x), 40)), x, r.y - 4);
     }
 
-    const outline = (r, width = 1, dash) => {
-      ctx.lineWidth = width; ctx.strokeStyle = SELECT; ctx.setLineDash(dash || []);
+    const colorOf = id => { const n = index.get(id)?.node; return n && (n.component || n.instanceOf || ownerInstance(index, id)) ? COMPONENT : SELECT; };
+    const outline = (r, width = 1, dash, color = SELECT) => {
+      ctx.lineWidth = width; ctx.strokeStyle = color; ctx.setLineDash(dash || []);
       ctx.strokeRect(Math.round(r.x) + .5, Math.round(r.y) + .5, Math.round(r.w), Math.round(r.h));
       ctx.setLineDash([]);
     };
     const outlineNode = (id, width) => {
-      const node = index.get(id).node, r = scr(absoluteRect(index, id));
+      const node = index.get(id).node, r = scr(absoluteRect(index, id)), color = colorOf(id);
       if (node.type === 'ellipse') {
-        ctx.lineWidth = width; ctx.strokeStyle = SELECT;
+        ctx.lineWidth = width; ctx.strokeStyle = color;
         ctx.beginPath(); ctx.ellipse(r.x + r.w / 2, r.y + r.h / 2, Math.max(0, r.w / 2), Math.max(0, r.h / 2), 0, 0, Math.PI * 2); ctx.stroke();
-      } else outline(r, width, node.type === 'group' ? [4, 3] : null);
+      } else outline(r, width, node.type === 'group' ? [4, 3] : null, color);
     };
     const drag = editor.drag;
     if (editor.hoverId && !selected.has(editor.hoverId) && index.has(editor.hoverId)) outlineNode(editor.hoverId, 1.5);
@@ -100,14 +109,16 @@ export class Renderer {
     if (box && !editor.editingTextId) {
       const r = scr(box);
       if (editor.selection.length > 1) outline(r);
-      if (!drag || drag.kind !== 'pan') {
+      // Layers inside an instance have no handles: their size comes from the component.
+      const fixed = editor.movable(editor.selection).length < editor.selection.length;
+      if ((!drag || drag.kind !== 'pan') && !fixed) {
         ctx.fillStyle = '#fff'; ctx.strokeStyle = SELECT; ctx.lineWidth = 1;
         for (const h of handlePoints(r)) {
           ctx.fillRect(Math.round(h.x - HANDLE_SIZE / 2) + .5, Math.round(h.y - HANDLE_SIZE / 2) + .5, HANDLE_SIZE - 1, HANDLE_SIZE - 1);
           ctx.strokeRect(Math.round(h.x - HANDLE_SIZE / 2) + .5, Math.round(h.y - HANDLE_SIZE / 2) + .5, HANDLE_SIZE - 1, HANDLE_SIZE - 1);
         }
       }
-      if (!editor.measures.length) pill(ctx, `${round(box.w)} × ${round(box.h)}`, r.x + r.w / 2, r.y + r.h + 17, SELECT);
+      if (!editor.measures.length) pill(ctx, `${round(box.w)} × ${round(box.h)}`, r.x + r.w / 2, r.y + r.h + 17, editor.selection.length === 1 ? colorOf(editor.selection[0]) : SELECT);
     }
 
     // Snap guides: thin lines with a small cross at each end.
@@ -161,6 +172,11 @@ function pill(ctx, label, cx, cy, color) {
   ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText(label, cx, cy + .5);
   ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+}
+
+function diamond(ctx, cx, cy, r, filled) {
+  ctx.beginPath(); ctx.moveTo(cx, cy - r); ctx.lineTo(cx + r, cy); ctx.lineTo(cx, cy + r); ctx.lineTo(cx - r, cy); ctx.closePath();
+  if (filled) ctx.fill(); else { ctx.strokeStyle = ctx.fillStyle; ctx.lineWidth = 1.2; ctx.stroke(); }
 }
 
 // Screen positions of the eight resize handles of a screen rectangle.

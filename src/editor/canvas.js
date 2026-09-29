@@ -20,13 +20,14 @@ function snapContext(editor, parent, exclude) {
   return { siblings, parentRect: around[0] || null, targets: [...siblings, ...around] };
 }
 
-export function attachCanvas(canvas, editor, renderer, { onContextMenu, onDropFiles } = {}) {
+export function attachCanvas(canvas, editor, renderer, { onContextMenu, onDropFiles, onDropItem } = {}) {
   const local = e => { const b = canvas.getBoundingClientRect(); return { x: e.clientX - b.left, y: e.clientY - b.top }; };
   const world = p => toWorld(editor.camera, p);
   let spaceDown = false;
 
   const handleAt = screen => {
     if (editor.tool !== 'move' || !editor.selection.length || editor.editingTextId) return null;
+    if (editor.movable(editor.selection).length < editor.selection.length) return null;
     const box = editor.selectionBounds();
     if (!box) return null;
     const cam = editor.camera;
@@ -125,10 +126,12 @@ export function attachCanvas(canvas, editor, renderer, { onContextMenu, onDropFi
     if (drag.kind === 'move') {
       if (!drag.moved) {
         if (!far) return;
+        // Layers inside an instance stay where the component puts them.
+        if (!editor.movable(editor.selection).length) { drag.kind = 'blocked'; return; }
         editor.begin();
         // Alt + drag leaves the originals where they are and moves copies.
         if (drag.alt) editor.duplicateSelection({ x: 0, y: 0 }, { transaction: false });
-        drag.ids = topLevelOnly(editor.index, editor.selection);
+        drag.ids = editor.movable(topLevelOnly(editor.index, editor.selection));
         drag.starts = drag.ids.map(id => { const n = editor.node(id); return { x: n.x, y: n.y }; });
         drag.box = boundsOf(drag.ids.map(id => absoluteRect(editor.index, id)));
         drag.snap = snapContext(editor, editor.index.get(drag.ids[0]).parent, drag.ids);
@@ -236,7 +239,10 @@ export function attachCanvas(canvas, editor, renderer, { onContextMenu, onDropFi
         editor.floating.clear();
         // Dropped over another frame (or out of its own): the layers move into it, staying where they are.
         const target = editor.frameAt(drag.last || at, drag.ids);
-        if (drag.drop && drag.drop.target === target) editor.insertInto(drag.ids, target, drag.drop.index);
+        // A component can't be dropped into itself (or into a frame inside it), also not as an instance: then the
+        // layers stay in the frame they were in.
+        if (target && !editor.canHold(target, drag.ids.map(id => editor.node(id)))) { /* stay */ }
+        else if (drag.drop && drag.drop.target === target) editor.insertInto(drag.ids, target, drag.drop.index);
         // Layers inside a group stay in it (take them out in the layers panel or with Ctrl+Shift+G).
         else for (const id of drag.ids) {
           const parent = editor.index.get(id)?.parent || null;
@@ -292,8 +298,15 @@ export function attachCanvas(canvas, editor, renderer, { onContextMenu, onDropFi
   });
 
   // Images and SVG files dropped from Explorer land where they are dropped.
-  canvas.addEventListener('dragover', e => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
+  // Components and images dragged from the assets panel too.
+  const ITEM = 'application/x-visual-item';
+  canvas.addEventListener('dragover', e => {
+    const types = e.dataTransfer.types;
+    if (types.includes('Files') || types.includes(ITEM)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }
+  });
   canvas.addEventListener('drop', e => {
+    const item = e.dataTransfer.getData(ITEM);
+    if (item && onDropItem) { e.preventDefault(); return onDropItem(JSON.parse(item), world(local(e))); }
     if (!e.dataTransfer.files.length || !onDropFiles) return;
     e.preventDefault();
     onDropFiles([...e.dataTransfer.files], world(local(e)));
@@ -329,7 +342,7 @@ function marqueeHits(editor, rect) {
   for (const n of editor.page.children) {
     if (!n.visible || n.locked) continue;
     const r = absoluteRect(index, n.id);
-    if (n.type === 'frame' && n.children.length && !inside(r)) {
+    if (n.type === 'frame' && n.children.length && !n.instanceOf && !inside(r)) {
       for (const c of n.children) if (c.visible && !c.locked && touches(absoluteRect(index, c.id))) hits.push(c.id);
     } else if (touches(r)) hits.push(n.id);
   }

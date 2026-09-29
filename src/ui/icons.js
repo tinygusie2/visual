@@ -37,7 +37,15 @@ const paths = {
   vector: '<path d="M3 12.5C5 5 11 11 13 3.5"/><rect x="1.8" y="11.3" width="2.4" height="2.4" rx=".4"/><rect x="11.8" y="2.3" width="2.4" height="2.4" rx=".4"/>',
   'dir-row': '<path d="M2 8h11M10 5l3 3-3 3"/>',
   'dir-column': '<path d="M8 2v11M5 10l3 3 3-3"/>',
-  'auto-layout': '<rect x="2.5" y="2.5" width="11" height="4" rx="1"/><rect x="2.5" y="9.5" width="11" height="4" rx="1"/>'
+  'auto-layout': '<rect x="2.5" y="2.5" width="11" height="4" rx="1"/><rect x="2.5" y="9.5" width="11" height="4" rx="1"/>',
+  component: '<path d="M8 1.8l2.2 2.2L8 6.2 5.8 4zM8 9.8l2.2 2.2L8 14.2 5.8 12zM4 5.8l2.2 2.2L4 10.2 1.8 8zM12 5.8l2.2 2.2-2.2 2.2L9.8 8z"/>',
+  instance: '<path d="M8 2l6 6-6 6-6-6z"/>',
+  detach: '<path d="M6.5 9.5l3-3M5 7.5L3.6 8.9a2.5 2.5 0 003.5 3.5L8.5 11M11 8.5l1.4-1.4a2.5 2.5 0 00-3.5-3.5L7.5 5M2.5 2.5l2 2M13.5 13.5l-2-2"/>',
+  'go-to': '<path d="M9 2.5h4.5V7M13.5 2.5L7.5 8.5M11.5 9.5v3a1 1 0 01-1 1h-7a1 1 0 01-1-1v-7a1 1 0 011-1h3"/>',
+  reset: '<path d="M3 3v3.5h3.5M3.4 6.3A5 5 0 113 9"/>',
+  variable: '<path d="M8 1.8l5.4 3.1v6.2L8 14.2l-5.4-3.1V4.9z"/><circle cx="8" cy="8" r="1.8"/>',
+  search: '<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/>',
+  unlink: '<path d="M6.5 9.5l3-3M5 7.5L3.6 8.9a2.5 2.5 0 003.5 3.5L8.5 11M11 8.5l1.4-1.4a2.5 2.5 0 00-3.5-3.5L7.5 5"/>'
 };
 
 export function icon(name) {

@@ -1,5 +1,5 @@
 // Entry point of the editor page: wires the editor state to the canvas, panels, top bar, tools, shortcuts and files.
-import { absolute, parseDocument, serializeDocument } from './core/document.js';
+import { absolute, absoluteRect, parseDocument, serializeDocument } from './core/document.js';
 import { gradient, solid, stroke } from './core/paint.js';
 import { attachCanvas } from './editor/canvas.js';
 import { Editor } from './editor/editor.js';
@@ -15,6 +15,7 @@ import { attachLayers, inlineRename } from './ui/layers.js';
 import { closeMenu, menuKeys, showMenu } from './ui/menu.js';
 import { attachProperties } from './ui/properties.js';
 import { attachStart } from './ui/start.js';
+import { attachAssets } from './ui/assets.js';
 
 document.documentElement.lang = lang;
 const $ = s => document.querySelector(s);
@@ -39,10 +40,31 @@ const canvas = $('#canvas');
 const renderer = new Renderer(canvas, editor);
 const canvasApi = attachCanvas(canvas, editor, renderer, {
   onContextMenu: point => showMenu(point, contextMenu()),
-  onDropFiles: async (files, at) => importFiles(await Promise.all(files.map(async f => ({ name: f.name, data: await f.arrayBuffer() }))), at)
+  onDropFiles: async (files, at) => importFiles(await Promise.all(files.map(async f => ({ name: f.name, data: await f.arrayBuffer() }))), at),
+  // From the assets panel: a component becomes an instance, an image is placed again.
+  onDropItem: (item, at) => {
+    editor.setTool('move');
+    if (item.kind === 'component') editor.createInstance(item.id, at);
+    if (item.kind === 'image' && editor.assets.has(item.id)) editor.placeImages([{ id: item.id, ...editor.assets.get(item.id) }], at);
+  }
 });
 attachTextEditor($('#stage'), editor);
-attachLayers($('#left'), editor);
+
+// Left sidebar: two tabs, the layers (with the pages) and the assets.
+$('#left').innerHTML = `<div class="left-tabs" role="tablist">
+  <button role="tab" data-tab="layers" title="${t('Layers')}  (Alt+1)">${t('Layers')}</button>
+  <button role="tab" data-tab="assets" title="${t('Assets')}  (Alt+2)">${t('Assets')}</button></div>
+  <div class="left-pane" data-pane="layers"></div><div class="left-pane" data-pane="assets" hidden></div>`;
+attachLayers($('[data-pane=layers]'), editor);
+const assets = attachAssets($('[data-pane=assets]'), editor, { onPlaceImage: a => { editor.setTool('move'); editor.placeImages([a]); } });
+function showTab(name) {
+  document.querySelectorAll('.left-tabs [data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
+  document.querySelectorAll('.left-pane').forEach(p => { p.hidden = p.dataset.pane !== name; });
+  assets.show(name === 'assets');
+  try { localStorage.setItem('visual.leftTab', name); } catch {}
+}
+document.querySelectorAll('.left-tabs [data-tab]').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+showTab((() => { try { return localStorage.getItem('visual.leftTab') === 'assets' ? 'assets' : 'layers'; } catch { return 'layers'; } })());
 attachProperties($('#right'), editor, { fonts, onExport: nodes => exportLayers(nodes), onPickImage: pickImage });
 new ResizeObserver(() => { editor.viewport = { w: canvas.clientWidth, h: canvas.clientHeight }; }).observe(canvas);
 editor.viewport = { w: canvas.clientWidth || 1200, h: canvas.clientHeight || 800 };
@@ -258,7 +280,16 @@ async function copyAs(format) {
 function contextMenu() {
   const sel = editor.selectedNodes, has = sel.length > 0;
   const allHidden = has && sel.every(n => !n.visible), allLocked = has && sel.every(n => n.locked);
+  const one = sel.length === 1 ? sel[0] : null;
+  const inInstance = one && editor.movable([one.id]).length === 0;
+  const instance = one && (one.instanceOf || inInstance);
   return [
+    ...(instance ? [
+      { label: 'Go to main component', action: () => editor.goToComponent(one.id) },
+      { label: 'Reset changes', action: () => editor.resetOverrides([one.id]), disabled: !editor.overridesOf(one.id).length },
+      ...(one.instanceOf && !inInstance ? [{ label: 'Detach instance', shortcut: 'Ctrl+Alt+B', action: () => editor.detachInstances() }] : []),
+      '-'
+    ] : []),
     { label: 'Copy', shortcut: 'Ctrl+C', action: () => editor.copy(), disabled: !has },
     { label: 'Paste', shortcut: 'Ctrl+V', action: () => editor.paste(), disabled: !editor.clipboard },
     { label: 'Duplicate', shortcut: 'Ctrl+D', action: () => editor.duplicateSelection(), disabled: !has },
@@ -266,6 +297,7 @@ function contextMenu() {
     { label: 'Group selection', shortcut: 'Ctrl+G', action: () => editor.wrap('group'), disabled: !has },
     { label: 'Frame selection', shortcut: 'Ctrl+Alt+G', action: () => editor.wrap('frame'), disabled: !has },
     { label: 'Ungroup', shortcut: 'Ctrl+Shift+G', action: () => editor.unwrap(), disabled: !sel.some(n => n.children) },
+    { label: 'Create component', shortcut: 'Ctrl+Alt+K', action: () => editor.createComponent(), disabled: !has || !!inInstance || !!one?.component },
     sel.length === 1 && sel[0].layout
       ? { label: 'Remove auto layout', shortcut: 'Alt+Shift+A', action: () => editor.removeAutoLayout() }
       : { label: 'Add auto layout', shortcut: 'Shift+A', action: () => editor.addAutoLayout(), disabled: !has },
@@ -355,6 +387,8 @@ window.addEventListener('keydown', e => {
     if (e.shiftKey && k === 'e') return handled(), exportLayers();
     if (e.shiftKey && k === 'c') return handled(), copyAs('png');
     if (k === 'a') return handled(), editor.selectAll();
+    if (e.altKey && k === 'k') return handled(), editor.createComponent();
+    if (e.altKey && k === 'b') return handled(), editor.detachInstances();
     if (e.shiftKey && k === 'k') return handled(), placeFromDialog();
     // Ctrl+C / X / V: handled by the copy, cut and paste events (system clipboard).
     if (k === 'c' || k === 'x' || k === 'v') return;
@@ -367,6 +401,8 @@ window.addEventListener('keydown', e => {
     if (e.shiftKey && k === 'l') return handled(), editor.toggle(editor.selection, 'locked');
     return;
   }
+  if (e.altKey && e.code === 'Digit1') return handled(), showTab('layers');
+  if (e.altKey && e.code === 'Digit2') return handled(), showTab('assets');
   if (e.shiftKey && e.code === 'Digit0') return handled(), editor.zoomTo(1);
   if (e.shiftKey && e.code === 'Digit1') return handled(), editor.zoomToFit();
   if (e.shiftKey && e.code === 'Digit2') return handled(), editor.zoomToSelection();
@@ -404,7 +440,9 @@ const shortcutGroups = [
     ['Ctrl+Shift+H / L', 'Hide / lock'], ['Ctrl+G / Ctrl+Shift+G', 'Group / ungroup'], ['Ctrl+Alt+G', 'Frame selection'],
     ['Alt+A D W S H V', 'Align'], ['Ctrl + drag', 'Place without snapping'], ['Alt + hover', 'Measure distances'],
     ['Ctrl+Shift+E', 'Export…'], ['Ctrl+Shift+C', 'Copy as PNG'], ['Shift+A / Alt+Shift+A', 'Add / remove auto layout'],
-    ['Ctrl+Shift+K', 'Place image or SVG…']]]
+    ['Ctrl+Shift+K', 'Place image or SVG…']]],
+  ['Components', [['Ctrl+Alt+K', 'Create component'], ['Ctrl+Alt+B', 'Detach instance'], ['Ctrl+D / Alt + drag', 'Duplicate a component: a new instance'],
+    ['Double-click', 'Go into an instance'], ['Alt+1 / Alt+2', 'Layers / assets']]]
 ];
 $('#shortcuts').innerHTML = `<h2>${t('Keyboard shortcuts')}</h2><div class="shortcut-cols">${shortcutGroups.map(([title, rows]) =>
   `<div><h3>${t(title)}</h3><dl>${rows.map(([keys, what]) => `<dt>${t(keys)}</dt><dd>${t(what)}</dd>`).join('')}</dl></div>`).join('')}</div>
@@ -418,7 +456,7 @@ $('#shortcuts').innerHTML = `<h2>${t('Keyboard shortcuts')}</h2><div class="shor
 
 // Self check used by `--smoke-test`: draws through the same code paths as the mouse and saves + reopens a file.
 window.__visual = {
-  editor,
+  editor, showTab,
   async smoke(path) {
     const checks = {};
     editor.newDocument('Smoke', { name: 'Phone', w: 390, h: 844 });
@@ -603,6 +641,91 @@ window.__visual = {
     const rec = parseDocument(await host.recoveryRead(editor.doc.id));
     checks.recovery = rec.pages.length === editor.doc.pages.length && Object.keys(rec.assets).length === 1;
     const step3Page = editor.pageId;
+
+    // ---------- step 4: components, instances, overrides, colour variables, assets panel ----------
+    editor.addPage('Step 4');
+    editor.zoomTo(1);
+    const step4Page = editor.pageId;
+    const c4 = editor.viewCenter();
+    const tick = () => new Promise(r => setTimeout(r));
+    editor.transact(() => {
+      const bg = editor.addNode('rect', { name: 'Background', x: c4.x - 260, y: c4.y - 160, w: 120, h: 40, radius: 20, fills: [solid('#5b8cff')], constraints: { h: 'stretch', v: 'top' } });
+      const label = editor.addNode('text', { name: 'Label', x: c4.x - 240, y: c4.y - 150, text: 'Buy now', fontSize: 16, fontWeight: 600, fills: [solid('#ffffff')] });
+      editor.selection = [bg.id, label.id];
+    });
+    const btn = editor.createComponent();
+    editor.rename(btn.id, 'Button');
+    const [bgId, labelId] = btn.children.map(n => n.id);
+    checks.componentMade = btn.component === true && btn.children.length === 2 && editor.components().length === 1;
+    editor.select([btn.id]);
+    editor.duplicateSelection({ x: 0, y: 80 });
+    const instId = editor.selection[0];
+    const I = () => editor.node(instId);
+    checks.duplicateIsInstance = I()?.instanceOf === btn.id && I().children[1].id === `${instId};${labelId}` && I().y === editor.node(btn.id).y + 80;
+    editor.update([bgId], { fills: [solid('#ff3366')] });
+    checks.instanceFollows = I().children[0].fills[0].color === '#ff3366';
+    // Typing in the instance's label is an override; the component's later changes to other properties still come in.
+    const instLabelId = `${instId};${labelId}`;
+    editor.startEditingText(instLabelId);
+    const area4 = document.querySelector('.text-edit');
+    area4.value = 'Sold out'; area4.dispatchEvent(new Event('input'));
+    area4.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    editor.update([labelId], { text: 'Buy today', fontSize: 18 });
+    const IL = () => editor.node(instLabelId);
+    checks.overrideKept = IL().text === 'Sold out' && IL().fontSize === 18 && editor.node(labelId).text === 'Buy today' && editor.overridesOf(instLabelId).length === 1;
+    // Layers inside an instance don't move; a click picks the instance as a whole and drags it.
+    const lx = IL().x;
+    editor.select([instLabelId]); editor.nudge(10, 0);
+    checks.childFixed = IL().x === lx;
+    editor.clearSelection();
+    const at4 = (x, y) => { const b = canvas.getBoundingClientRect(), cam = editor.camera; return { clientX: b.left + (x - cam.x) * cam.zoom, clientY: b.top + (y - cam.y) * cam.zoom }; };
+    // Ctrl while moving (no snapping), not on the press (that would pick the deepest layer).
+    const fire4 = (type, x, y) => canvas.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 4, button: 0, buttons: 1, ctrlKey: type !== 'pointerdown', ...at4(x, y) }));
+    const ir = absoluteRect(editor.index, instId);
+    fire4('pointerdown', ir.x + 60, ir.y + 5); fire4('pointermove', ir.x + 80, ir.y + 5); fire4('pointermove', ir.x + 100, ir.y + 5); fire4('pointerup', ir.x + 100, ir.y + 5);
+    checks.instancePicked = editor.selection[0] === instId && I().x === ir.x + 40;
+    // Wider instance: the background stretches (its constraint), the component stays as it is.
+    editor.update([instId], { w: 200 });
+    checks.instanceResized = I().children[0].w === 200 && editor.node(bgId).w === 120;
+    editor.resetOverrides([instId]);
+    checks.reset = IL().text === 'Buy today';
+    editor.undo();
+
+    // Colour variables: bound in the assets panel and in the colour picker, changed in one place.
+    const brand = editor.addVariable('#12b886', 'Brand/Primary');
+    editor.select([bgId]); editor.useVariableAsFill(brand.id);
+    checks.variableBound = editor.node(bgId).fills[0].variable === brand.id && I().children[0].fills[0].color === '#12b886';
+    editor.updateVariable(brand.id, { color: '#f59f00' });
+    checks.variableChanged = editor.node(bgId).fills[0].color === '#f59f00' && I().children[0].fills[0].color === '#f59f00';
+    let dot4;
+    editor.transact(() => { dot4 = editor.addNode('ellipse', { x: c4.x + 200, y: c4.y - 160, w: 40, h: 40 }); editor.selection = [dot4.id]; });
+    await tick();
+    document.querySelector('#right .swatch-btn').click();
+    document.querySelector('.picker .var-colors .sw').click();
+    closeColorPicker();
+    await tick();
+    checks.pickerVariable = editor.node(dot4.id).fills[0].variable === brand.id && !!document.querySelector('#right .var-chip:not([hidden])');
+
+    // The assets panel: the component and the variable are listed; clicking the component adds an instance.
+    showTab('assets');
+    checks.assetsPanel = document.querySelectorAll('.comp-tile').length === 1 && document.querySelectorAll('.var-row').length === 1 && document.querySelectorAll('.img-tile').length === 1;
+    document.querySelector('.comp-tile').click();
+    const tileInst = editor.selectedNodes[0];
+    checks.tileInstance = tileInst?.instanceOf === btn.id;
+    // Nested: a card component around that instance; card instances follow the button component too.
+    editor.update([tileInst.id], { x: tileInst.x + 10 });
+    const cardComp = editor.createComponent();
+    editor.rename(cardComp.id, 'Card');
+    editor.update([cardComp.id], { fills: [solid('#ffffff')], w: cardComp.w + 40, h: cardComp.h + 40 });
+    editor.select([cardComp.id]); editor.duplicateSelection({ x: 260, y: 0 });
+    const cardInstId = editor.selection[0];
+    editor.update([bgId], { radius: 6 });
+    checks.nested = editor.node(cardInstId)?.children[0]?.children[0]?.radius === 6;
+    checks.noCycles = !editor.canHold(editor.node(btn.id), [editor.node(cardInstId)]);
+    editor.select([cardInstId]); editor.detachInstances();
+    checks.detached = !editor.node(cardInstId).instanceOf && editor.node(cardInstId).children[0].instanceOf === btn.id;
+    editor.undo();
+    showTab('layers');
     editor.setPage(firstPage);
 
     const ids = JSON.stringify(editor.page.children[0].children.map(n => n.id));
@@ -611,6 +734,8 @@ window.__visual = {
     const back = parseDocument((await host.read(saved)).text);
     checks.idsSurviveSave = JSON.stringify(back.pages[0].children[0].children.map(n => n.id)) === ids;
     checks.assetsSurviveSave = Object.keys(back.assets).length === 1 && back.pages.find(pg => pg.id === step3Page).children.length === 5;
+    const saved4 = JSON.stringify(back.pages.find(pg => pg.id === step4Page));
+    checks.componentsSurviveSave = back.variables.length === 1 && saved4.includes(`"instanceOf":"${btn.id}"`) && saved4.includes('Sold out') && saved4.includes(`"variable":"${brand.id}"`);
     recovery.clear();
     checks.layers = document.querySelectorAll('#left .layer').length;
     checks.props = document.querySelectorAll('#right .prop-section').length;

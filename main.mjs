@@ -178,6 +178,21 @@ async function runSmoke() {
       await new Promise(r => setTimeout(r, 600));
       writeFileSync(pageShot, (await win.webContents.capturePage()).toPNG());
     }
+    // --assets-shot path: the third page (components, instances, variables) with the assets tab and an instance selected.
+    const assetsShot = process.argv.includes('--assets-shot') && process.argv[process.argv.indexOf('--assets-shot') + 1];
+    if (assetsShot) {
+      const err = await win.webContents.executeJavaScript(`(() => { try { const v = window.__visual, e = v.editor; document.querySelector('.picker .close')?.click();
+        e.drag = null; e.floating.clear(); e.guides = []; e.measures = [];
+        e.setPage(e.doc.pages[2].id); e.zoomToFit(); v.showTab('assets');
+        const inst = e.page.children.find(n => n.instanceOf && n.overrides && Object.keys(n.overrides).length); e.select([inst.id]); } catch (err) { return String(err.stack); } })()`);
+      if (err) console.log('ASSETS-SHOT', err);
+      await new Promise(r => setTimeout(r, 800));
+      writeFileSync(assetsShot, (await win.webContents.capturePage()).toPNG());
+      // And the layers tab, with the text inside that instance selected.
+      await win.webContents.executeJavaScript(`(() => { const v = window.__visual, e = v.editor; v.showTab('layers'); e.select([e.selectedNodes[0].children[1].id]); })()`);
+      await new Promise(r => setTimeout(r, 500));
+      writeFileSync(assetsShot.replace(/\.png$/i, '-layers.png'), (await win.webContents.capturePage()).toPNG());
+    }
   }
   // Its own files; the settings folder only when it is the temporary one made for the check.
   const temporary = [out, out.replace(/\.visual$/i, '-export'), ...(process.env.VISUAL_HOME ? [] : [settingsDir])];
